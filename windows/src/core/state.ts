@@ -1,7 +1,7 @@
 // App state — mirror of AppState.swift (the parts the island needs).
 
 import type { BotEmoteName, BotStateName, IslandMode, IslandViewName } from "./layout";
-import type { EyeShape } from "../mochi/engine";
+import type { EyeShape, AvatarSkin } from "../mochi/engine";
 import {
   DEFAULT_MAIN_PILL, HOST_OS, availablePills, orderPills, pillDefinition, sanitizeDeclared,
   toggleDeclared, type HostOs, type PillDefinition,
@@ -39,6 +39,63 @@ export interface AgentTask {
   sessionId?: string | null;
   /** Claude's final message after Stop, one line; cleared when a new turn starts. */
   finalLine?: string | null;
+  /** Set only from Orca's verified Run/Dispatch relationship. */
+  parentId?: string | null;
+  nativeTurn?: string | null;
+  nativeSettledAt?: number;
+  nativeSessionId?: string;
+  nativeParentSession?: string;
+  provider?: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
+  terminalHandle?: string;
+  paneKey?: string | null;
+  finalSummary?: string | null;
+  completionRevision?: number;
+  completionAttempts?: number;
+}
+
+export interface OrcaRun {
+  id: string;
+  objective: string;
+  coordinatorHandle: string;
+}
+
+export interface OrcaActivity {
+  state: BotStateName;
+  step?: string | null;
+  prompt?: string | null;
+  updatedAt: number;
+  finalResponse?: string | null;
+}
+
+export interface OrcaSnapshot {
+  runs: OrcaRun[];
+  selectedRun: OrcaRun | null;
+  coordinator: { handle: string; cwd: string | null; connected: boolean; provider?: string | null; paneKey?: string | null; activity?: OrcaActivity | null } | null;
+  workers: { id: string; taskId?: string; name: string; state: BotStateName; cwd: string | null; terminalHandle: string; paneKey?: string | null; provider: string | null; settled?: boolean; activity?: OrcaActivity | null }[];
+}
+
+/** Extract plain display text from the first prose block of an assistant response. */
+export function firstFinalParagraph(text?: string | null): string | null {
+  if (!text?.trim()) return null;
+  const lines = text.slice(0, 12000).replace(/\r\n?/g, "\n").split("\n");
+  const paragraph: string[] = [];
+  let fence = false;
+  for (const line of lines) {
+    const value = line.trim();
+    if (/^(```|~~~)/.test(value)) { if (paragraph.length) break; fence = !fence; continue; }
+    if (fence) continue;
+    if (!value || /^#{1,6}\s/.test(value) || /^\|/.test(value) || /^[-*_]{3,}$/.test(value)) {
+      if (paragraph.length) break;
+      continue;
+    }
+    const item = value.replace(/^(?:[-*+]\s+|\d+[.)]\s+|>\s*)/, "");
+    paragraph.push(item);
+    if (item !== value) break;
+  }
+  const result = paragraph.join(" ").replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)").replace(/\*\*([^*]+)\*\*|__([^_]+)__|`([^`]+)`/g, (_all, bold, emphasis, code) => bold ?? emphasis ?? code).replace(/\s+/g, " ").trim();
+  return result ? result.slice(0, 1600) : null;
 }
 
 export interface ApprovalInfo {
@@ -98,6 +155,8 @@ export interface IntegrationInfo {
 }
 
 export interface Settings {
+  orcaSkin?: boolean;
+  principalSkin?: AvatarSkin | null;
   soundEnabled: boolean;
   soundVolume: number;
   autoCloseInterval: number;
@@ -148,6 +207,7 @@ export interface Settings {
    * else English), or one of src/i18n's ten codes ("fr", "pt-BR", "zh-Hans"…).
    */
   language: string;
+  activeProjectId?: string;
   /**
    * The phone link for Coucou for Android is on. Rust owns it (only the switch in
    * Settings → Android phone turns it on): whatever the page sends back is ignored.
@@ -166,7 +226,13 @@ export interface Settings {
   };
 }
 
+export function principalSkin(settings: Pick<Settings, "principalSkin" | "orcaSkin">): AvatarSkin {
+  return settings.principalSkin ?? (settings.orcaSkin ? "orca" : "classic");
+}
+
 export const DEFAULT_SETTINGS: Settings = {
+  orcaSkin: false,
+  principalSkin: null,
   soundEnabled: true,
   soundVolume: 0.12,
   autoCloseInterval: 15,
@@ -193,6 +259,7 @@ export const DEFAULT_SETTINGS: Settings = {
   mochiOutfit: DEFAULT_OUTFIT,
   pillColors: {},
   language: "",
+  activeProjectId: "",
 };
 
 type Listener = () => void;
@@ -208,6 +275,16 @@ class AppState {
 
   tasks: AgentTask[] = [];
   focusId: string | null = null;
+  orca: OrcaSnapshot | null = null;
+  orcaRunId: string | null = null;
+  manualOrcaRunId: string | null = null;
+  orcaError: string | null = null;
+  private observedOrcaWorkers = new Set<string>();
+  private settledOrcaWorkers = new Map<string, number>();
+  private finalizedOrcaWorkers = new Map<string, OrcaSnapshot["workers"][number]>();
+  private activeOrcaWorkers = new Map<string, { worker: OrcaSnapshot["workers"][number]; lastSeenAt: number }>();
+  private coordinatorActivityAt = 0;
+  private workerActivityAt = new Map<string, number>();
 
   stateOverride: BotStateName | null = null;
 
@@ -279,12 +356,336 @@ class AppState {
     for (const fn of this.listeners) fn();
   }
 
+  get coordinatorTask(): AgentTask | null {
+    return this.tasks.find((t) => t.id === "integration_claude" || t.id === this.mainPillId) ?? null;
+  }
+
+  providerLabel(provider?: string | null): string {
+    const labels: Record<string, string> = { claude: "Claude", codex: "Codex", antigravity: "Antigravity", gemini: "Gemini", opencode: "OpenCode", pi: "Pi", omp: "OMP", grok: "Grok" };
+    return labels[provider?.toLowerCase() ?? ""] ?? "";
+  }
+
+  get coordinatorProviderLabel(): string {
+    return this.providerLabel(this.orca?.coordinator?.provider) || "Coordinator";
+  }
+
+  get childTasks(): AgentTask[] {
+    return this.tasks.filter((t) => t.parentId === "integration_claude" || (this.mainPillId && t.parentId === this.mainPillId));
+  }
+
+  noteOrcaHook(id: string) {
+    if (id === "integration_claude" || id === this.mainPillId) this.coordinatorActivityAt = Date.now();
+    else if (id.startsWith("orca_")) this.workerActivityAt.set(id, Date.now());
+  }
+
+  syncOrca(snapshot: OrcaSnapshot, nowMs = performance.now()) {
+    const binding = `${snapshot.selectedRun?.id ?? ""}:${snapshot.coordinator?.handle ?? ""}`;
+    const previous = `${this.orca?.selectedRun?.id ?? ""}:${this.orca?.coordinator?.handle ?? ""}`;
+    const changed = binding !== previous;
+    if (changed) {
+      this.observedOrcaWorkers.clear();
+      this.settledOrcaWorkers.clear();
+      this.finalizedOrcaWorkers.clear();
+      this.activeOrcaWorkers.clear();
+      this.workerActivityAt.clear();
+    }
+    this.orca = snapshot;
+    if (snapshot.selectedRun) this.orcaRunId = snapshot.selectedRun.id;
+    this.orcaError = null;
+    const main = this.coordinatorTask;
+    if (main) {
+      main.sessionCwd = snapshot.coordinator?.cwd ?? null;
+      main.terminalHandle = snapshot.coordinator?.handle;
+      main.paneKey = snapshot.coordinator?.paneKey;
+      if (changed) {
+        this.coordinatorActivityAt = 0;
+        main.steps = [];
+        main.stepIndex = 0;
+        main.state = "idle";
+        main.pillBadge = null;
+        main.finalSummary = null;
+        main.completionRevision = (main.completionRevision ?? 0) + 1;
+        this.focusId = main.id;
+      }
+      const activity = snapshot.coordinator?.activity;
+      if (activity && activity.updatedAt > this.coordinatorActivityAt && Date.now() - activity.updatedAt <= 60000) {
+        if (!["finished", "error", "idle"].includes(activity.state)) {
+          main.finalSummary = null;
+          main.completionRevision = (main.completionRevision ?? 0) + 1;
+        }
+        main.state = activity.state;
+        if (activity.prompt && !main.steps.length) main.steps.push(activity.prompt);
+        if (activity.state === "finished" && activity.finalResponse) main.finalSummary = firstFinalParagraph(activity.finalResponse);
+        if (activity.step && main.steps.at(-1) !== activity.step) {
+          main.steps.push(activity.step);
+          main.stepIndex = main.steps.length - 1;
+        }
+        this.coordinatorActivityAt = activity.updatedAt;
+      }
+    }
+    const incoming = new Set(snapshot.workers.map((w) => w.id));
+    const incomingTasks = new Set(snapshot.workers.map((w) => w.taskId));
+    const visible = snapshot.workers.filter((worker) => {
+      if (!worker.settled) {
+        this.observedOrcaWorkers.add(worker.id);
+        this.settledOrcaWorkers.delete(worker.id);
+        this.finalizedOrcaWorkers.delete(worker.id);
+        this.activeOrcaWorkers.set(worker.id, { worker, lastSeenAt: nowMs });
+        return true;
+      }
+      this.activeOrcaWorkers.delete(worker.id);
+      if (!this.observedOrcaWorkers.has(worker.id)) return false;
+      const settledAt = this.settledOrcaWorkers.get(worker.id) ?? nowMs;
+      this.settledOrcaWorkers.set(worker.id, settledAt);
+      this.finalizedOrcaWorkers.set(worker.id, worker);
+      if (nowMs - settledAt < 60000) return true;
+      this.observedOrcaWorkers.delete(worker.id);
+      this.settledOrcaWorkers.delete(worker.id);
+      this.finalizedOrcaWorkers.delete(worker.id);
+      return false;
+    });
+    for (const [id, item] of this.activeOrcaWorkers) {
+      if (incoming.has(id)) continue;
+      if (nowMs - item.lastSeenAt < 60000 && (!item.worker.taskId || !incomingTasks.has(item.worker.taskId))) {
+        visible.push(item.worker);
+      } else {
+        this.activeOrcaWorkers.delete(id);
+      }
+    }
+    for (const [id, worker] of this.finalizedOrcaWorkers) {
+      const since = this.settledOrcaWorkers.get(id) ?? nowMs;
+      if (incoming.has(id)) continue;
+      if (nowMs - since < 60000 && (!worker.taskId || !incomingTasks.has(worker.taskId))) visible.push(worker);
+      else {
+        this.finalizedOrcaWorkers.delete(id);
+        this.settledOrcaWorkers.delete(id);
+        this.observedOrcaWorkers.delete(id);
+      }
+    }
+    const ids = new Set(visible.map((w) => `orca_${w.id}`));
+    for (const key of this.workerActivityAt.keys()) {
+      if (!ids.has(key)) this.workerActivityAt.delete(key);
+    }
+    this.tasks = this.tasks.filter((t) => t.parentId !== "integration_claude" || ids.has(t.id) || (!changed && !!t.nativeSessionId));
+    for (const worker of visible) {
+      const id = `orca_${worker.id}`;
+      let task = this.tasks.find((t) => t.id === id);
+      if (!task) {
+        task = {
+          id,
+          name: worker.name,
+          color: "#60A5FA",
+          state: worker.state,
+          stepIndex: 0,
+          steps: [],
+          source: "agent",
+          isIntegration: false,
+          parentId: "integration_claude",
+        };
+        this.tasks.push(task);
+      }
+      task.name = worker.name;
+      const normProvider = (worker.provider ?? "").toLowerCase();
+      const provider = normProvider === "gemini" ? "antigravity" : normProvider;
+      task.provider = provider || worker.provider;
+      task.color = provider === "claude" ? "#EAB308" : provider === "antigravity" ? "#E879F9" : "#60A5FA";
+      if (task.state !== worker.state && !["finished", "error", "idle"].includes(worker.state)) {
+        task.finalSummary = null;
+        task.completionRevision = (task.completionRevision ?? 0) + 1;
+        task.completionAttempts = 0;
+      }
+      task.state = worker.state;
+      task.sessionCwd = worker.cwd;
+      task.terminalHandle = worker.terminalHandle;
+      task.paneKey = worker.paneKey;
+      task.pillBadge = worker.state === "finished" ? "finished" : worker.state === "error" ? "error" : worker.state === "approval" ? "approval" : null;
+      const activity = worker.activity;
+      const lastAt = this.workerActivityAt.get(id) ?? 0;
+      if (activity && activity.updatedAt > lastAt && Date.now() - activity.updatedAt <= 60000) {
+        if (activity.state === "approval" && !worker.settled) {
+          task.state = "approval";
+          task.pillBadge = "approval";
+        }
+        if (activity.prompt && !task.steps.length) task.steps.push(activity.prompt);
+        if (activity.finalResponse && (task.state === "finished" || activity.state === "finished") && !task.finalSummary) {
+          task.finalSummary = firstFinalParagraph(activity.finalResponse);
+        }
+        if (activity.step && task.steps.at(-1) !== activity.step) {
+          task.steps.push(activity.step);
+          task.stepIndex = task.steps.length - 1;
+        }
+        this.workerActivityAt.set(id, activity.updatedAt);
+      }
+    }
+    this.notify();
+  }
+
+  syncNativeChildren(parentSession: string, children: {id:string;name:string;state:string;text?:string|null;phase?:string|null;turn?:string|null}[], nowMs=Date.now()) {
+    const incoming = new Set(children.map(c => `native_${c.id}`));
+    this.tasks = this.tasks.filter(t => {
+      if (!t.nativeParentSession) return true;
+      if (t.nativeParentSession !== parentSession) return false;
+      if (!incoming.has(t.id)) {
+        t.nativeSettledAt ??= nowMs;
+        if (!["finished","error"].includes(t.state)) t.state = "idle";
+      }
+      return t.nativeSettledAt === undefined || nowMs-t.nativeSettledAt < 60000;
+    });
+    for (const child of children) {
+      const id = `native_${child.id}`;
+      let task = this.tasks.find((t) => t.id === id);
+      if (!task && child.state !== "working") continue;
+      if (!task) {
+        task = {
+          id,
+          name: child.name,
+          state: "working",
+          color: "#60A5FA",
+          steps: [],
+          stepIndex: 0,
+          source: "agent",
+          isIntegration: false,
+          parentId: "integration_claude",
+          provider: "codex",
+          nativeSessionId: child.id,
+          nativeParentSession: parentSession,
+        };
+        this.tasks.push(task);
+      }
+      const activeTask = task;
+      if (activeTask.nativeTurn !== child.turn) {
+        activeTask.nativeTurn = child.turn;
+        activeTask.steps = [];
+        activeTask.stepIndex = 0;
+        activeTask.finalSummary = null;
+        activeTask.completionRevision = (activeTask.completionRevision ?? 0) + 1;
+      }
+      if (child.state === "working") activeTask.nativeSettledAt = undefined;
+      else activeTask.nativeSettledAt ??= nowMs;
+      activeTask.state = child.state === "finished" ? "finished" : child.state === "error" ? "error" : child.state === "working" ? "working" : "idle";
+      activeTask.pillBadge = activeTask.state === "finished" ? "finished" : activeTask.state === "error" ? "error" : null;
+      if (child.text && child.phase === "commentary") this.appendAssistantMessage(id, child.text);
+      if (child.text && child.phase === "final_answer" && activeTask.state === "finished") this.setFinalSummary(id, child.text);
+    }
+    this.notify();
+  }
+
+  appendAssistantMessage(id: string, text: string) {
+    const paragraph = firstFinalParagraph(text);
+    if (paragraph) this.appendStep(id, paragraph);
+  }
+
+  hookTaskId(cwd: string, terminalHandle = "", paneKey = ""): string | null {
+    if (!this.orca || this.orcaError || this.orcaRunId !== this.orca.selectedRun?.id || !cwd) return null;
+    const scoped = [this.coordinatorTask, ...this.childTasks].filter((t): t is AgentTask => !!t);
+    if (terminalHandle || paneKey) {
+      const exact = scoped.filter((t) => (!terminalHandle || t.terminalHandle === terminalHandle) && (!paneKey || t.paneKey === paneKey));
+      return exact.length === 1 ? exact[0].id : null;
+    }
+    const normalize = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    const matching = scoped.filter((t) => t?.sessionCwd && normalize(t.sessionCwd) === normalize(cwd));
+    return matching.length === 1 ? matching[0]!.id : null;
+  }
+
+  selectOrcaRun(id: string) {
+    if (id === "") {
+      this.manualOrcaRunId = null;
+      this.notify();
+      return;
+    }
+    if (!this.orca?.runs.some((run) => run.id === id) || id === this.orcaRunId) return;
+    this.manualOrcaRunId = id;
+    this.orcaRunId = id;
+    this.focusId = "integration_claude";
+    this.activeOrcaWorkers.clear();
+    this.workerActivityAt.clear();
+    this.tasks = this.tasks.filter((t) => t.parentId !== "integration_claude");
+    const main = this.coordinatorTask;
+    if (main) {
+      main.state = "idle";
+      main.steps = [];
+      main.stepIndex = 0;
+      main.sessionCwd = null;
+      main.finalSummary = null;
+      main.completionRevision = (main.completionRevision ?? 0) + 1;
+    }
+    this.notify();
+  }
+
+  orcaUnavailable() {
+    this.orcaError = "Orca unavailable";
+    this.tasks = this.tasks.filter((t) => t.parentId !== "integration_claude");
+    this.focusId = "integration_claude";
+    this.activeOrcaWorkers.clear();
+    this.workerActivityAt.clear();
+    if (this.coordinatorTask) this.coordinatorTask.state = "idle";
+    this.notify();
+  }
+
+  completionToken(id: string) {
+    const task = this.tasks.find((t) => t.id === id);
+    return { task, run: this.orcaRunId, revision: task?.completionRevision ?? 0 };
+  }
+
+  applyFinalSummary(token: ReturnType<typeof this.completionToken>, response?: string | null): boolean {
+    if (!token.task || token.run !== this.orcaRunId || !this.tasks.includes(token.task) || token.revision !== (token.task.completionRevision ?? 0)) return false;
+    if (!token.task.finalSummary) this.setFinalSummary(token.task.id, response);
+    return true;
+  }
+
+  setFinalSummary(id: string, response?: string | null) {
+    const task = this.tasks.find((t) => t.id === id);
+    if (!task) return;
+    task.finalSummary = firstFinalParagraph(response);
+    this.notify();
+  }
+  get projects(): { id: string; name: string }[] {
+    const list: { id: string; name: string }[] = [];
+    const seen = new Set<string>();
+    for (const task of this.tasks) {
+      if (task.projectId && !seen.has(task.projectId)) {
+        seen.add(task.projectId);
+        const name = task.projectName && task.projectName !== task.projectId
+          ? `${task.projectName} (${task.projectId})`
+          : (task.projectName || task.projectId);
+        list.push({ id: task.projectId, name });
+      }
+    }
+    return list;
+  }
+
+  selectProject(id: string) {
+    this.settings.activeProjectId = id;
+    if (id) {
+      const target = this.tasks.find((t) => t.projectId === id);
+      if (target) this.focusId = target.id;
+    }
+    this.notify();
+  }
+
+  get visibleTasks(): AgentTask[] {
+    const active = this.settings.activeProjectId;
+    if (!active) {
+      const firstProject = this.tasks.find((t) => t.projectId)?.projectId;
+      if (firstProject) {
+        return this.tasks.filter((t) => !t.projectId || t.projectId === firstProject);
+      }
+      return this.tasks;
+    }
+    return this.tasks.filter((t) => !t.projectId || t.projectId === active);
+  }
+
   get focusTask(): AgentTask | null {
     return this.tasks.find((t) => t.id === this.focusId) ?? this.tasks[0] ?? null;
   }
 
   get effectiveState(): BotStateName {
-    return this.stateOverride ?? this.focusTask?.state ?? "idle";
+    if (this.stateOverride) return this.stateOverride;
+    if (this.orca) {
+      if (this.orcaError || !this.orca.coordinator?.connected) return "idle";
+      return this.coordinatorTask?.state ?? "idle";
+    }
+    return this.focusTask?.state ?? "idle";
   }
 
   /** Spotify plays on a declared pill: Mochi dances (Linux; never on Windows yet). */
@@ -293,7 +694,7 @@ class AppState {
   }
 
   get otherTasks(): AgentTask[] {
-    return this.tasks.filter((t) => t.id !== this.focusId);
+    return this.visibleTasks.filter((t) => t.id !== this.focusId);
   }
 
   setFocus(id: string) {
@@ -338,6 +739,11 @@ class AppState {
   updateTask(id: string, state: BotStateName) {
     const t = this.tasks.find((x) => x.id === id);
     if (!t) return;
+    if (!["finished", "error", "idle"].includes(state)) {
+      t.finalSummary = null;
+      t.completionRevision = (t.completionRevision ?? 0) + 1;
+      t.completionAttempts = 0;
+    }
     t.state = state;
     this.notify();
   }
@@ -460,11 +866,22 @@ class AppState {
    * Inserted right after the main pill so it is in the visible slice(0,4). A
    * catalog agent wears its catalog colour, as on macOS.
    */
-  upsertExternalAgent(id: string, name: string, color: string) {
-    if (this.tasks.some((t) => t.id === id)) return;
+  upsertExternalAgent(id: string, name: string, color: string, cwdOrProjectId?: string, projectName?: string, _agentId?: string, provider?: string | null) {
+    const isProject = Boolean(projectName || id.startsWith("project:"));
+    const projectId = isProject ? (cwdOrProjectId || (id.startsWith("project:") ? id.split(":")[1] : undefined)) : undefined;
+    const sessionCwd = !isProject ? cwdOrProjectId : undefined;
+    const existing = this.tasks.find((t) => t.id === id);
+    if (existing) {
+      if (sessionCwd) existing.sessionCwd = sessionCwd;
+      if (projectId) existing.projectId = projectId;
+      if (projectName) existing.projectName = projectName;
+      if (provider) existing.provider = provider;
+      return;
+    }
     const def = pillDefinition(id);
     this.insertAfterMain({
       id, name, color: def ? pillColor(def.id, def.color, this.settings.pillColors) : color,
+      sessionCwd, projectId, projectName, provider,
       state: "idle", stepIndex: 0, steps: [],
       source: "agent", isIntegration: false,
     });
@@ -475,16 +892,19 @@ class AppState {
    * for the session when it is neither the main pill nor declared, as
    * upsertWorkspaceTask does on macOS.
    */
-  upsertWorkspacePill(id: string, name: string, cwd: string): AgentTask | null {
+  upsertWorkspacePill(id: string, name: string, cwd: string, projectId?: string, baseId = id): AgentTask | null {
     let t = this.tasks.find((x) => x.id === id);
     if (!t) {
-      const def = pillDefinition(id);
+      const def = pillDefinition(baseId);
       if (!def) return null;
       t = taskFor(def, this.settings.pillColors, name);
+      t.id = id;
+      if (projectId) t.projectId = projectId;
       this.insertAfterMain(t);
     }
     t.name = name;
     if (cwd) t.sessionCwd = cwd;
+    if (projectId) t.projectId = projectId;
     return t;
   }
 

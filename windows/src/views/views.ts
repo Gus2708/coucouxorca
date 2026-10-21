@@ -114,6 +114,20 @@ export function buildHeader(actions: ViewActions): ViewHost {
 
   const gearBtn = h("button", { title: tl("Settings"), onclick: () => go("settings") }, svg(ICONS.gear, 14));
   const soundBtn = h("button", { title: tl("Mute"), onclick: () => actions.toggleSound() }, svg(ICONS.speakerOn, 14));
+  const closeBtn = h(
+    "button",
+    { class: "close-btn", title: tl("Close Notch"), onclick: () => actions.collapse() },
+    svg(ICONS.xmark, 11),
+  );
+  const projectPicker = h("select", {
+    class: "project-picker",
+    "aria-label": t("Project"),
+    onchange: () => {
+      State.selectProject(projectPicker.value);
+      void Bridge.saveSettings(State.settings);
+    },
+  });
+  let projectKey = "";
   // Plan usage pills (off by default): before the gear, Claude first, as on the Mac.
   const claudePill = buildPlanPill(false);
   const codexPill = buildPlanPill(true);
@@ -129,7 +143,8 @@ export function buildHeader(actions: ViewActions): ViewHost {
     "div",
     { id: "header" },
     h("div", { class: "tabs" }, tabHome, tabChat, tabDrop),
-    h("div", { class: "header-actions" }, planPills, gearBtn, soundBtn),
+    projectPicker,
+    h("div", { class: "header-actions" }, planPills, gearBtn, soundBtn, closeBtn),
   );
   const headerActions = el.lastElementChild as HTMLElement;
 
@@ -146,6 +161,17 @@ export function buildHeader(actions: ViewActions): ViewHost {
       clear(soundBtn);
       soundBtn.append(svg(State.settings.soundEnabled ? ICONS.speakerOn : ICONS.speakerOff, 14));
       syncPlanPills();
+      const projects = State.projects;
+      const nextProjectKey = projects.map((project) => `${project.id}=${project.name}`).join("|");
+      if (projectKey !== nextProjectKey) {
+        projectKey = nextProjectKey;
+        projectPicker.replaceChildren(...projects.map((project) => h("option", {
+          value: project.id,
+          text: project.name,
+        })));
+      }
+      projectPicker.style.display = projects.length > 1 ? "" : "none";
+      projectPicker.value = State.settings.activeProjectId ?? "";
       el.style.opacity = v === "confused" ? "0" : "1";
     },
   };
@@ -345,10 +371,11 @@ function buildOverview(actions: ViewActions): ViewHost {
         clear(who);
         // The agent's name is already the pill's: the label says what kind of
         // pill it is, as on the Mac (PillDefinition.sessionSubtitle).
+        const catalogId = task.projectId ? task.id.slice(task.id.lastIndexOf(":") + 1).split(":")[0] : task.id;
         who.append(
           dot(task.color, 7),
           h("span", { class: "name", text: task.name }),
-          h("span", { class: "tool", text: t(sessionSubtitle(task.id)) }),
+          h("span", { class: "tool", text: t(sessionSubtitle(catalogId)) }),
         );
         if (task.steps.length > 1) {
           who.append(h("span", {
@@ -419,9 +446,10 @@ export function hasSessionTicker(task: AgentTask): boolean {
   // A pill made for an agent's session (Gemini CLI, Codex… not declared) only
   // exists while that session does: it keeps the ticker from the first event.
   if (task.source === "agent" && !task.isIntegration) return true;
-  const category = pillDefinition(task.id)?.category;
+  const catalogId = task.projectId ? task.id.slice(task.id.lastIndexOf(":") + 1).split(":")[0] : task.id;
+  const category = pillDefinition(catalogId)?.category;
   const isSession = category === "workspace" || category === "agent" ||
-    (category == null && task.id.startsWith("agent_"));
+    (category == null && catalogId.startsWith("agent_"));
   return isSession && (task.state !== "idle" || task.steps.length > 0);
 }
 

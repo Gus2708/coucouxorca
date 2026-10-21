@@ -47,11 +47,76 @@ function cancelStopTimer(id: string): boolean {
 /** Events after which a pending permission request of the same session is moot. */
 const TURN_OVER = new Set(["Stop", "StopFailure", "UserPromptSubmit", "SessionEnd", "Interrupt"]);
 
+const eventRevisions = new Map<string, number>();
+
+interface CodexBinding {
+  task: (typeof State.tasks)[number];
+  run: string | null;
+  path: string;
+  session: string;
+  turn: string;
+  lastText?: string;
+  lastStep?: string;
+  nativeResponses?: Map<string, string>;
+}
+const codexBindings = new Map<string, CodexBinding>();
+let activeIsland: Island | null = null;
+const seenResponses = new Map<string, string>();
+function assistantResponse(id: string, text: string | undefined, phase: string, session = "", turn = "") {
+  if (!text?.trim()) return;
+  const key = `${State.orcaRunId}:${session}:${turn}:${phase}:${text}`;
+  if (seenResponses.get(id) === key) return;
+  seenResponses.set(id, key);
+  if (State.mode !== "expanded") activeIsland?.alert(phase === "final_answer" && State.focusId === id ? "finished" : "overview");
+}
+
+/** Read only a hook-published transcript for the exact observed task and turn. */
+export async function pollCodexMessages() {
+  for (const [id, binding] of [...codexBindings]) {
+    if (State.paused || binding.run !== State.orcaRunId || !State.tasks.includes(binding.task)) {
+      codexBindings.delete(id);
+      continue;
+    }
+    try {
+      if (id === CLAUDE_ID && Bridge.codexChildren) {
+        const children = await Bridge.codexChildren(binding.path, binding.session);
+        if (codexBindings.get(id) !== binding || binding.run !== State.orcaRunId || !State.tasks.includes(binding.task)) continue;
+        State.syncNativeChildren(binding.session, children);
+        const previous = binding.nativeResponses;
+        const next = new Map<string, string>();
+        for (const child of children) {
+          const key = `${child.turn}:${child.phase}:${child.text ?? ""}`;
+          next.set(child.id, key);
+          if (child.text && previous?.has(child.id) && previous.get(child.id) !== key) {
+            assistantResponse(`native_${child.id}`, child.text, child.phase ?? "commentary", child.id, child.turn ?? "");
+          }
+        }
+        binding.nativeResponses = next;
+      }
+      const response = await Bridge.codexMessage(binding.path, binding.session, binding.turn);
+      if (!response || codexBindings.get(id) !== binding || binding.run !== State.orcaRunId || !State.tasks.includes(binding.task)) continue;
+      if (response.phase === "commentary" && !["finished", "error", "idle"].includes(binding.task.state)) {
+        if (response.text !== binding.lastText || binding.task.steps.at(-1) !== binding.lastStep) {
+          const fresh = response.text !== binding.lastText;
+          State.appendAssistantMessage(id, response.text);
+          if (fresh) assistantResponse(id, response.text, response.phase, binding.session, binding.turn);
+          binding.lastText = response.text;
+          binding.lastStep = binding.task.steps.at(-1);
+        }
+      } else if (response.phase === "final_answer" && binding.task.state === "finished" && !binding.task.finalSummary) {
+        State.setFinalSummary(id, response.text);
+        assistantResponse(id, response.text, response.phase, binding.session, binding.turn);
+      }
+    } catch { /* An unavailable exact transcript cannot authorize a guessed session. */ }
+  }
+}
+
 interface HookPayload {
   hook_event_name?: string;
   request_id?: string;
   session_id?: string;
   cwd?: string;
+  project_root?: string;
   message?: string;
   /** UserPromptSubmit carries `prompt`; `message` belongs to Notification/Stop. */
   prompt?: string;
@@ -63,10 +128,17 @@ interface HookPayload {
   coucou_diff_truncated?: boolean;
   /** Optional agent tag: lowercase, digits and hyphens, ≤ 24 chars. */
   coucou_agent?: string;
+  /** Claude Code subagent event identity and display type. */
+  agent_id?: string;
+  agent_type?: string;
   /** Hermes: where the session runs (telegram, discord…; "cli" in a terminal). */
   platform?: string;
   /** "cursor" when Claude Code runs in Cursor's terminal (set by the relay). */
   term_editor?: string;
+  orca_terminal_handle?: string;
+  orca_pane_key?: string;
+  turn_id?: string;
+  transcript_path?: string;
   /** StatusLine (the plan usage relay): Claude Code's 5-hour and weekly limits. */
   rate_limits?: unknown;
 }
@@ -193,8 +265,8 @@ function askedQuestions(tool: string, input: Record<string, unknown>): AskedQues
 }
 
 /** The Claude Code session's pill, named after its project for the session. */
-function upsert(id: string, projectName: string, cwd: string, sessionId: string) {
-  const t = State.upsertWorkspacePill(id, projectName, cwd);
+function upsert(id: string, projectName: string, cwd: string, sessionId: string, projectId?: string, baseId = id) {
+  const t = State.upsertWorkspacePill(id, projectName, cwd, projectId, baseId);
   if (t && sessionId) t.sessionId = sessionId;
 }
 
@@ -238,6 +310,7 @@ function recordDiff(agentId: string, payload: HookPayload) {
 }
 
 export function registerHookHandlers(island: Island) {
+  activeIsland = island;
   // The last plan numbers seen survive a restart, as on the Mac.
   State.planUsage ??= restorePlanUsage(storedClaudePlanUsage());
   void onEvent<HookPayload>("hook", (payload) => handleHook(island, payload));
@@ -262,6 +335,7 @@ function handleHook(island: Island, payload: HookPayload) {
 
   const name = payload.hook_event_name ?? "";
   const cwd = payload.cwd ?? "";
+  const projectId = payload.project_root ?? "";
   const raw = lastPathComponent(cwd);
   const projectName = aliasProjectName(raw || "Session");
 
@@ -270,9 +344,52 @@ function handleHook(island: Island, payload: HookPayload) {
   // when it runs in Cursor's terminal (Mac #120), VS Code's otherwise.
   const validAgent = validateAgent(payload.coucou_agent);
   const workspaceId = payload.term_editor === "cursor" ? CURSOR_ID : CLAUDE_ID;
-  const agentId = validAgent ? `agent_${validAgent}` : workspaceId;
-  const isExternalAgent = validAgent !== null;
+  const baseAgentId = validAgent ? `agent_${validAgent}` : workspaceId;
   const sessionId = payload.session_id ?? "";
+  const workerId = sessionId ? `:${encodeURIComponent(sessionId)}` : "";
+
+  let agentId: string;
+  if (State.orca) {
+    const orcaTarget = State.hookTaskId(cwd, payload.orca_terminal_handle, payload.orca_pane_key);
+    let resolved = orcaTarget;
+    if (resolved && payload.agent_id) {
+      const owner = codexBindings.get(resolved);
+      const child = State.childTasks.find((t) => t.nativeSessionId === payload.agent_id && t.nativeParentSession === owner?.session);
+      resolved = child?.id ?? null;
+    }
+    if (!resolved) {
+      if (payload.request_id) void Bridge.approvalDecline(payload.request_id);
+      return;
+    }
+    agentId = resolved;
+  } else {
+    agentId = projectId ? `project:${encodeURIComponent(projectId)}:${baseAgentId}${workerId}` : baseAgentId;
+  }
+
+  const subagentId = projectId && payload.agent_id
+    ? `${agentId}:subagent:${encodeURIComponent(payload.agent_id)}`
+    : null;
+  const isExternalAgent = validAgent !== null || (Boolean(State.orca) && agentId !== CLAUDE_ID);
+
+  State.noteOrcaHook(agentId);
+  const revision = (eventRevisions.get(agentId) ?? 0) + 1;
+  eventRevisions.set(agentId, revision);
+
+  const task = State.tasks.find((item) => item.id === agentId);
+  const provider = agentId === CLAUDE_ID ? State.orca?.coordinator?.provider
+    : task?.nativeSessionId ? "codex" : State.orca?.workers.find((worker) => `orca_${worker.id}` === agentId)?.provider;
+  if (task && provider === "codex" && !payload.agent_id) {
+    const previous = codexBindings.get(agentId);
+    if (name === "SessionStart" || name === "UserPromptSubmit" || name === "SessionEnd" || (payload.turn_id && previous?.turn !== payload.turn_id)) {
+      codexBindings.delete(agentId);
+    }
+    if (payload.transcript_path && payload.session_id && payload.turn_id) {
+      const same = previous && codexBindings.get(agentId) === previous && previous.task === task && previous.run === State.orcaRunId && previous.path === payload.transcript_path && previous.session === payload.session_id && previous.turn === payload.turn_id;
+      if (!same) {
+        codexBindings.set(agentId, { task, run: State.orcaRunId, path: payload.transcript_path, session: payload.session_id, turn: payload.turn_id });
+      }
+    }
+  }
 
   /** Alerts force the island open; work events only reveal the compact island. */
   const surface = (view: Parameters<Island["alert"]>[0], isAlert: boolean) => {
@@ -288,12 +405,14 @@ function handleHook(island: Island, payload: HookPayload) {
   /** Ensure the agent pill exists (no-op for Claude Code). */
   const ensurePill = () => {
     if (isExternalAgent) {
-      State.upsertExternalAgent(agentId, agentName(validAgent!), agentColor(validAgent!));
+      State.upsertExternalAgent(agentId, agentName(validAgent!), agentColor(validAgent!), projectId || undefined, projectName, baseAgentId, validAgent);
       const t = State.tasks.find((x) => x.id === agentId);
       if (t && cwd) t.sessionCwd = cwd;
       if (t && sessionId) t.sessionId = sessionId;
     } else {
-      upsert(agentId, projectName, cwd, sessionId);
+      upsert(agentId, projectName, cwd, sessionId, projectId || undefined, baseAgentId);
+      const task = State.tasks.find((x) => x.id === agentId);
+      if (task) task.provider = validAgent ?? (baseAgentId === CLAUDE_ID ? "claude" : null);
     }
   };
 
@@ -339,6 +458,7 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
 
     case "UserPromptSubmit": {
+      seenResponses.delete(agentId);
       ensurePill();
       supersedeStop();
       clearFinalLine(agentId);
@@ -371,6 +491,13 @@ function handleHook(island: Island, payload: HookPayload) {
 
     case "PostToolUse":
       supersedeStop();
+      // A restart can miss PreToolUse while the tool is already running.
+      // Restore only the missing step, using this verified session's payload.
+      if (State.orca && payload.tool_name && !State.tasks.find((t) => t.id === agentId)?.steps.length) {
+        State.appendStep(agentId, stepLabel(payload.tool_name, payload.tool_input ?? {}));
+      }
+      State.updateTask(agentId, "working");
+      surface("overview", false);
       // The question was answered in the terminal: the card would be lying.
       if (
         payload.tool_name === "AskUserQuestion" &&
@@ -381,7 +508,6 @@ function handleHook(island: Island, payload: HookPayload) {
         pendingTimeout = null;
         dropPendingCard(island);
       }
-      State.updateTask(agentId, "working");
       recordDiff(agentId, payload);
       break;
 
@@ -407,6 +533,10 @@ function handleHook(island: Island, payload: HookPayload) {
     }
 
     case "Stop": {
+      if (payload.last_assistant_message) {
+        State.setFinalSummary(agentId, payload.last_assistant_message);
+        assistantResponse(agentId, payload.last_assistant_message, "final_answer", payload.session_id, payload.turn_id);
+      }
       State.updateTask(agentId, "finished");
       // Claude Code puts the turn's answer in the Stop payload itself, so there is
       // no transcript to read (the relay does not even forward its path). Other
@@ -420,8 +550,13 @@ function handleHook(island: Island, payload: HookPayload) {
       }
       Sound.play("finish");
       // A card waiting for an answer is never covered by another alert.
-      if (focused && !State.pendingApproval) surface("finished", true);
-      else State.setPillBadge(agentId, "finished");
+      if (State.orca) {
+        if (focused && State.mode === "expanded") surface("finished", false);
+        else State.setPillBadge(agentId, "finished");
+      } else {
+        if (focused && !State.pendingApproval) surface("finished", true);
+        else State.setPillBadge(agentId, "finished");
+      }
       cancelStopTimer(agentId);
       stopTimers.set(
         agentId,
@@ -458,6 +593,10 @@ function handleHook(island: Island, payload: HookPayload) {
       // pill recreated within 5.2 s would be removed by it.
       cancelStopTimer(agentId);
       State.clearSessionDiffs(agentId);
+      for (const child of State.tasks.filter((task) => task.id.startsWith(`${agentId}:subagent:`))) {
+        cancelStopTimer(child.id);
+        State.removeTask(child.id);
+      }
       if (isExternalAgent) {
         State.removeTask(agentId);
       } else {
@@ -467,11 +606,35 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
 
     case "SubagentStart":
-      State.appendStep(agentId, t("+ subagent"));
+      if (subagentId) {
+        ensurePill();
+        const parent = State.tasks.find((task) => task.id === agentId);
+        State.upsertExternalAgent(subagentId, payload.agent_type || "Subagent", parent?.color ?? agentColor("codex"), projectId, projectName, subagentId, parent?.provider ?? validAgent);
+        const child = State.tasks.find((task) => task.id === subagentId);
+        if (child) {
+          if (cwd) child.sessionCwd = cwd;
+          child.sessionId = sessionId || null;
+        }
+        cancelStopTimer(subagentId);
+        State.updateTask(subagentId, "working");
+        State.appendStep(subagentId, t("+ subagent"));
+      } else {
+        State.appendStep(agentId, t("+ subagent"));
+      }
       break;
 
     case "SubagentStop":
-      State.appendStep(agentId, t("• subagent done"));
+      if (subagentId && State.tasks.some((task) => task.id === subagentId)) {
+        State.updateTask(subagentId, "finished");
+        State.appendStep(subagentId, t("• subagent done"));
+        cancelStopTimer(subagentId);
+        stopTimers.set(subagentId, window.setTimeout(() => {
+          stopTimers.delete(subagentId);
+          State.removeTask(subagentId);
+        }, 5200));
+      } else {
+        State.appendStep(agentId, t("• subagent done"));
+      }
       break;
 
     case "PermissionRequest": {

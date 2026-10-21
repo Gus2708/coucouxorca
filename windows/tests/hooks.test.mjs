@@ -79,6 +79,66 @@ test("a session names the pill after its folder and reveals the island", () => {
   assert.deepEqual(asked, ["reveal"]);
 });
 
+test("agent sessions stay partitioned by worktree and the active project can switch", () => {
+  const main = "C:\\work\\repo";
+  const feature = "C:\\work\\repo-feature";
+  hook({ hook_event_name: "SessionStart", cwd: main, project_root: main, session_id: "s-main", coucou_agent: "codex" });
+  hook({ hook_event_name: "UserPromptSubmit", cwd: main, project_root: main, session_id: "s-main", coucou_agent: "codex", prompt: "main work" });
+  hook({ hook_event_name: "SessionStart", cwd: feature, project_root: feature, session_id: "s-feature", coucou_agent: "codex" });
+  hook({ hook_event_name: "UserPromptSubmit", cwd: feature, project_root: feature, session_id: "s-feature", coucou_agent: "codex", prompt: "feature work" });
+  hook({ hook_event_name: "SessionStart", cwd: main, project_root: main, session_id: "s-main-2", coucou_agent: "codex" });
+  hook({ hook_event_name: "UserPromptSubmit", cwd: main, project_root: main, session_id: "s-main-2", coucou_agent: "codex", prompt: "second worker" });
+
+  const mainTask = State.tasks.find((t) => t.projectId === main && t.sessionId === "s-main");
+  const secondMainTask = State.tasks.find((t) => t.projectId === main && t.sessionId === "s-main-2");
+  const featureTask = State.tasks.find((t) => t.projectId === feature);
+  assert.ok(mainTask);
+  assert.ok(secondMainTask);
+  assert.ok(featureTask);
+  assert.notEqual(mainTask.id, secondMainTask.id);
+  assert.notEqual(mainTask.id, featureTask.id);
+  assert.deepEqual(mainTask.steps, ["main work"]);
+  assert.deepEqual(secondMainTask.steps, ["second worker"]);
+  assert.deepEqual(featureTask.steps, ["feature work"]);
+  assert.deepEqual(State.projects.map((project) => project.id), [main, feature]);
+  assert.ok(State.visibleTasks.every((t) => !t.projectId || t.projectId === main));
+
+  State.selectProject(feature);
+  assert.equal(State.settings.activeProjectId, feature);
+  assert.equal(State.focusTask.projectId, feature);
+  assert.ok(State.otherTasks.every((t) => !t.projectId || t.projectId === feature));
+});
+
+test("subagents with the same id stay attached to their own worktrees", () => {
+  for (const [root, session] of [["C:\\work\\repo", "s1"], ["C:\\work\\repo-feature", "s2"]]) {
+    hook({ hook_event_name: "SessionStart", cwd: root, project_root: root, session_id: session });
+    hook({ hook_event_name: "SubagentStart", cwd: root, project_root: root, session_id: session, agent_id: "child-1", agent_type: "Explore" });
+  }
+
+  const children = State.tasks.filter((t) => t.name === "Explore");
+  assert.equal(children.length, 2);
+  assert.notEqual(children[0].id, children[1].id);
+  assert.deepEqual(new Set(children.map((t) => t.projectId)), new Set(["C:\\work\\repo", "C:\\work\\repo-feature"]));
+  assert.ok(children.every((t) => t.state === "working"));
+
+  hook({ hook_event_name: "SubagentStop", cwd: "C:\\work\\repo", project_root: "C:\\work\\repo", session_id: "s1", agent_id: "child-1", agent_type: "Explore" });
+  assert.equal(children.find((t) => t.projectId === "C:\\work\\repo").state, "finished");
+  seconds(5.2);
+  assert.equal(State.tasks.includes(children.find((t) => t.projectId === "C:\\work\\repo")), false);
+  assert.equal(State.tasks.includes(children.find((t) => t.projectId === "C:\\work\\repo-feature")), true);
+});
+
+test("a subagent inherits the provider skin of its Codex parent", () => {
+  const root = "C:\\work\\codex";
+  const session = "codex-session";
+  hook({ hook_event_name: "SessionStart", cwd: root, project_root: root, session_id: session, coucou_agent: "codex" });
+  hook({ hook_event_name: "SubagentStart", cwd: root, project_root: root, session_id: session, agent_id: "child-codex", agent_type: "Explore", coucou_agent: "codex" });
+
+  const child = State.tasks.find((t) => t.name === "Explore");
+  assert.ok(child);
+  assert.equal(child.provider, "codex");
+});
+
 test("known project folders get their display name, and no folder is a Session", () => {
   hook({ hook_event_name: "SessionStart", cwd: "/home/me/notch-buddy" });
   assert.equal(task().name, "Notch Buddy");

@@ -11,6 +11,7 @@ import {
   recordPress, type Binding,
 } from "../core/shortcuts";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
+import type { AvatarSkin } from "../mochi/engine";
 import type { UpdateStatus } from "../core/update";
 import { SOUND_NAMES } from "../core/sound";
 import {
@@ -955,6 +956,18 @@ function generalSection(): HTMLElement {
     void save();
   });
 
+  const principalSkin = h("select", {}) as HTMLSelectElement;
+  for (const [value, label] of [
+    ["classic", "Classic"], ["orca", "Orca"], ["antigravity", "Antigravity"],
+    ["codex", "Codex"], ["claude", "Claude"],
+  ]) principalSkin.append(h("option", { value, text: t(label) }));
+  principalSkin.value = settings.principalSkin && ["classic", "orca", "antigravity", "codex", "claude"].includes(settings.principalSkin)
+    ? settings.principalSkin : "classic";
+  principalSkin.addEventListener("change", () => {
+    settings.principalSkin = principalSkin.value as AvatarSkin;
+    void save();
+  });
+
   return h(
     "section",
     {},
@@ -985,6 +998,7 @@ function generalSection(): HTMLElement {
       h("label", { text: t("Island lives on") }),
       screen,
     ),
+    h("div", { class: "row" }, h("label", { text: t("Avatar skin") }), principalSkin),
     h("div", { class: "row" },
       h("label", { text: t("Launch at startup") }),
       toggle(settings.autostart, (v) => { settings.autostart = v; void save(); }),

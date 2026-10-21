@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { Settings } from "./state";
+import type { OrcaSnapshot, Settings } from "./state";
 import type { RecapHistory, RecapPrefs } from "../recap/summary";
 import type { SpotifyState } from "./spotify";
 import type { UpdateStatus } from "./update";
@@ -181,6 +181,11 @@ export interface PhoneAnswersStatus {
 
 export const Bridge = {
   boot: () => call<BootInfo>("boot"),
+  orcaSnapshot: (runId: string | null) => callOrThrow<OrcaSnapshot>("orca_snapshot", { runId }),
+  codexChildren: (transcriptPath: string, sessionId: string) => callOrThrow<{ id: string; name: string; state: string; text?: string | null; phase?: string | null; turn?: string | null }[]>("codex_children", { transcriptPath, sessionId }),
+  codexMessage: (transcriptPath: string, sessionId: string, turnId: string) => callOrThrow<{ text: string; phase: string } | null>("codex_message", { transcriptPath, sessionId, turnId }),
+  orcaCompletion: (dispatchId: string) => callOrThrow<string | null>("orca_completion", { dispatchId }),
+  openOrca: (terminalHandle: string | null, coordinatorHandle: string | null) => callOrThrow<{ opened: boolean; terminalFocused: boolean }>("open_orca", { terminalHandle, coordinatorHandle }),
   /** The system's languages as the webview sees them, for Rust's own texts (i18n.rs). */
   setSystemLanguages: (languages: string[]) => call<void>("set_system_languages", { languages }),
 
@@ -630,3 +635,4 @@ export async function onEvent<T>(name: string, handler: (payload: T) => void) {
   if (!IS_TAURI) return () => {};
   return listen<T>(name, (e) => handler(e.payload));
 }
+

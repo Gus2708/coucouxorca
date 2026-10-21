@@ -5117,6 +5117,32 @@
    "de": "Windows hat das Installationsprogramm blockiert. Hol dir die neue Version stattdessen von der Release-Seite.",
    "tr": "Windows yükleyiciyi engelledi. Yeni sürümü bunun yerine sürüm sayfasından al."
   },
+  "Avatar skin": {
+   "zh-Hans": "头像皮肤",
+   "hi": "अवतार की त्वचा",
+   "es": "Aspecto del avatar",
+   "ar": "مظهر الصورة الرمزية",
+   "fr": "Apparence de l’avatar",
+   "bn": "অ্যাভাটারের চেহারা",
+   "pt-BR": "Visual do avatar",
+   "ru": "Внешний вид аватара",
+   "id": "Tampilan avatar",
+   "de": "Avatar-Design",
+   "tr": "Avatar görünümü"
+  },
+  "Project": {
+   "zh-Hans": "项目",
+   "hi": "प्रोजेक्ट",
+   "es": "Proyecto",
+   "ar": "المشروع",
+   "fr": "Projet",
+   "bn": "প্রকল্প",
+   "pt-BR": "Projeto",
+   "ru": "Проект",
+   "id": "Proyek",
+   "de": "Projekt",
+   "tr": "Proje"
+  },
   "Update Coucou to {version}…": {
    "zh-Hans": "将 Coucou 更新到 {version}…",
    "hi": "Coucou को {version} पर अपडेट करें…",
@@ -5129,6 +5155,19 @@
    "id": "Perbarui Coucou ke {version}…",
    "de": "Coucou auf {version} aktualisieren…",
    "tr": "Coucou'yu {version} sürümüne güncelle…"
+  },
+  "Close Notch": {
+   "zh-Hans": "关闭刘海",
+   "hi": "नॉच बंद करें",
+   "es": "Cerrar muesca",
+   "ar": "إغلاق الشق",
+   "fr": "Fermer l’encoche",
+   "bn": "নচ বন্ধ করুন",
+   "pt-BR": "Fechar notch",
+   "ru": "Закрыть вырез",
+   "id": "Tutup notch",
+   "de": "Notch schließen",
+   "tr": "Çentiği kapat"
   }
  }
 }

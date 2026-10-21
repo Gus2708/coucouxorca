@@ -13,7 +13,7 @@ import {
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import { SPOTIFY_ID, islandDances } from "../core/spotify";
-import { BotEngine, hexToRGB } from "../mochi/engine";
+import { avatarSkin, BotEngine, hexToRGB } from "../mochi/engine";
 import { Greeting } from "../mochi/greeting";
 import { createMiniBot, pruneMiniBots, syncMiniBotStates, tickMiniBots } from "../mochi/minibots";
 import { SeasonCache, parseOutfit } from "../mochi/wardrobe";
@@ -315,6 +315,11 @@ export class Island {
   private wireFsm() {
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
     this.fsm.openOnHover = State.settings.openOnHover;
+    this.fsm.canHide = () => {
+      return !State.tasks.some(
+        (t) => t.state === "working" || t.state === "thinking" || t.state === "approval"
+      );
+    };
     this.fsm.onTransition = (from, to) => {
       // The greeting is over, however it ended: back to his desktop spot.
       if (from === "coucou" && to !== "coucou") this.desktop.launch();
@@ -1184,7 +1189,7 @@ export class Island {
     const showGrid = State.mode === "compact";
     this.miniGrid.style.opacity = showGrid ? "1" : "0";
     if (showGrid) {
-      const others = State.otherTasks.slice(0, 4);
+      const others = State.childTasks.length ? State.childTasks.slice(0, 4) : State.otherTasks.slice(0, 4);
       const key = others.map((t) => t.id).join("|");
       if (this.miniGrid.dataset.key !== key) {
         this.miniGrid.dataset.key = key;
@@ -1216,6 +1221,7 @@ export class Island {
 
   /** Applies settings coming from Rust at boot. */
   applySettings() {
+    BotEngine.setPrincipalSkin(avatarSkin(State.settings.principalSkin));
     Sound.setEnabled(State.settings.soundEnabled);
     Sound.setVolume(State.settings.soundVolume);
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;

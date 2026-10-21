@@ -29,6 +29,8 @@ export class IslandStateMachine {
   greetHoverCollapseDelay = 10;
   /** An alert waiting for an answer stays open, even when the mouse leaves. */
   pinned = false;
+  /** Predicate to check if any active agents prevent hiding. */
+  canHide: (() => boolean) | null = null;
   /**
    * Hovering opens the island all the way instead of peeking (Settings →
    * General → Open on hover, off by default), as IslandStateMachine.openOnHover.
@@ -161,10 +163,17 @@ export class IslandStateMachine {
     // A card folded away while it waits for an answer keeps the compact island
     // on screen, so it can be reopened (isHeldOpen on macOS).
     if (this.pinned) return;
-    this.petitHide = window.setTimeout(() => {
+    const delay = this.petitToHiddenDelay * 1000;
+    const setTimeoutFn = typeof window !== "undefined" ? window.setTimeout.bind(window) : globalThis.setTimeout;
+    this.petitHide = setTimeoutFn(() => {
       this.petitHide = null;
-      if (this.state === "petit" && !this.pinned) this.transition("hidden");
-    }, this.petitToHiddenDelay * 1000);
+      if (this.state !== "petit" || this.pinned) return;
+      if (this.canHide && !this.canHide()) {
+        this.schedulePetitHide();
+        return;
+      }
+      this.transition("hidden");
+    }, delay) as unknown as number;
   }
 
   private scheduleHomeCollapse() {
@@ -193,7 +202,8 @@ export class IslandStateMachine {
 
   private clear(which: "petitHide" | "homeCollapse" | "greetCollapse") {
     const id = this[which];
-    if (id != null) window.clearTimeout(id);
+    const clearTimeoutFn = typeof window !== "undefined" ? window.clearTimeout.bind(window) : globalThis.clearTimeout;
+    if (id != null) clearTimeoutFn(id as unknown as number);
     this[which] = null;
     if (which === "homeCollapse") this.homeCollapseDueAt = null;
   }
