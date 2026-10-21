@@ -24,6 +24,7 @@
 //! user had before, so that keeps working.
 
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -41,7 +42,7 @@ const DECISION_BUDGET: Duration = Duration::from_secs(110);
 
 /// Fields that are pointless to forward and can be enormous (a whole file read,
 /// a full command output). The island never shows them.
-const DROPPED_FIELDS: &[&str] = &["tool_response", "tool_output", "transcript_path"];
+const DROPPED_FIELDS: &[&str] = &["tool_response", "tool_output"];
 /// Longest string forwarded for any single field; the island truncates to far
 /// less than this anyway.
 const MAX_FIELD_LEN: usize = 2_000;
@@ -185,7 +186,12 @@ fn prepare(raw: &[u8], args: &Args, env: &dyn Fn(&str) -> Option<String>, cwd: &
         map.insert("cwd".into(), Value::String(cwd.to_string()));
     }
 
+    if let Some(root) = map.get("cwd").and_then(Value::as_str).and_then(project_root) {
+        map.insert("project_root".into(), Value::String(root));
+    }
+
     add_terminal_context(map, env);
+    add_orca_identity(map, env);
 
     // Kept whole: what goes back to Claude Code must be its own input, not the
     // shortened copy the island is shown.
@@ -202,8 +208,26 @@ fn prepare(raw: &[u8], args: &Args, env: &dyn Fn(&str) -> Option<String>, cwd: &
     Some(Event { line, name, question })
 }
 
+/// Identifies one checkout, including linked Git worktrees, by its canonical root.
+fn project_root(cwd: &str) -> Option<String> {
+    let path = Path::new(cwd).canonicalize().ok()?;
+    let root = path.ancestors().find(|candidate| candidate.join(".git").exists()).unwrap_or(&path);
+    Some(root.to_string_lossy().into_owned())
+}
+
 /// Which terminal the session runs in. Unlike macOS, Coucou here accepts events
 /// from every terminal, so this is context only — never a filter.
+
+fn add_orca_identity(map: &mut Map<String, Value>, env: &dyn Fn(&str) -> Option<String>) {
+    for (field, key) in [
+        ("orca_terminal_handle", "ORCA_TERMINAL_HANDLE"),
+        ("orca_pane_key", "ORCA_PANE_KEY"),
+    ] {
+        if let Some(value) = env(key).filter(|v| !v.trim().is_empty()) {
+            map.insert(field.into(), Value::String(value));
+        }
+    }
+}
 fn add_terminal_context(map: &mut Map<String, Value>, env: &dyn Fn(&str) -> Option<String>) {
     for (key, var) in [
         ("term_program", "TERM_PROGRAM"),
@@ -225,6 +249,9 @@ fn add_terminal_context(map: &mut Map<String, Value>, env: &dyn Fn(&str) -> Opti
 fn agent_tag(arg: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     if !arg.is_empty() {
         return Some(arg.to_string());
+    }
+    if let Some(agent) = env("COUCOU_AGENT").filter(|v| !v.trim().is_empty()) {
+        return Some(agent);
     }
     (env("CLAUDE_CODE_ENTRYPOINT").as_deref() == Some("claude-desktop"))
         .then(|| "claude-desktop".to_string())
@@ -374,6 +401,36 @@ mod tests {
 
     fn env_of(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
         move |name| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn project_root_uses_the_nearest_canonical_git_worktree() {
+        let temp = std::env::temp_dir().join(format!("coucou-project-{}", std::process::id()));
+        let worktree = temp.join("worktree");
+        let nested = worktree.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: ../repo/worktrees/feature").unwrap();
+
+        assert_eq!(project_root(nested.to_str().unwrap()).as_deref(), Some(worktree.canonicalize().unwrap().to_str().unwrap()));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn forwarded_events_include_the_canonical_worktree_root() {
+        let temp = std::env::temp_dir().join(format!("coucou-hook-root-{}", std::process::id()));
+        let nested = temp.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(temp.join(".git")).unwrap();
+        let cwd = nested.to_string_lossy();
+        let raw = serde_json::json!({ "hook_event_name": "SessionStart", "cwd": cwd }).to_string();
+        let args = Args { agent: String::new(), event: "SessionStart".into() };
+
+        let event = prepare(raw.as_bytes(), &args, &|_| None, "").expect("forwarded");
+        let payload: Value = serde_json::from_str(event.line.trim_end()).unwrap();
+        assert_eq!(payload["project_root"], temp.canonicalize().unwrap().to_string_lossy().as_ref());
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
@@ -540,3 +597,4 @@ mod tests {
         assert_eq!(multi["coucou_diff_truncated"], serde_json::Value::Bool(true));
     }
 }
+

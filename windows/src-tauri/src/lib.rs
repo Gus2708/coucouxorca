@@ -4,6 +4,7 @@ mod agent_hooks;
 mod agents;
 mod chat;
 mod claude;
+mod codex;
 mod codex_plan;
 mod config_file;
 mod desktop;
@@ -17,6 +18,7 @@ mod integrations;
 mod island;
 mod local_chat;
 mod log;
+mod orca;
 mod net;
 mod notes;
 mod openai_compat;
@@ -69,6 +71,57 @@ pub struct BootInfo {
     /// False where the OS has no global cursor (Wayland): the page then reports
     /// the cursor from its own mouse events.
     cursor_poll: bool,
+}
+
+
+#[tauri::command]
+async fn orca_snapshot(run_id: Option<String>) -> Result<orca::Snapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || orca::snapshot(run_id))
+        .await
+        .map_err(|_| "Orca telemetry worker stopped".to_string())?
+}
+
+#[tauri::command]
+async fn orca_completion(dispatch_id: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || orca::completion(dispatch_id))
+        .await
+        .map_err(|_| "Orca result reader stopped".to_string())?
+}
+
+#[tauri::command]
+async fn codex_children(
+    transcript_path: String,
+    session_id: String,
+) -> Result<Vec<codex::Child>, String> {
+    tauri::async_runtime::spawn_blocking(move || codex::read_children(transcript_path, session_id))
+        .await
+        .map_err(|_| "Codex child reader stopped".to_string())
+}
+
+#[tauri::command]
+async fn codex_message(
+    transcript_path: String,
+    session_id: String,
+    turn_id: String,
+) -> Result<Option<codex::Message>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        codex::read_message(transcript_path, session_id, turn_id)
+    })
+    .await
+    .map_err(|_| "Codex response reader stopped".to_string())?
+}
+
+#[tauri::command]
+async fn open_orca(
+    terminal_handle: Option<String>,
+    coordinator_handle: Option<String>,
+) -> Result<orca::OpenResult, String> {
+    let _ = orca::activate_desktop();
+    tauri::async_runtime::spawn_blocking(move || {
+        orca::open_terminal(terminal_handle, coordinator_handle)
+    })
+    .await
+    .map_err(|_| "Orca could not be opened".to_string())?
 }
 
 #[tauri::command]
@@ -289,6 +342,15 @@ fn open_in_vscode(path: Option<String>) -> bool {
             return false;
         }
     }
+    if let Some(orca) = platform::find_on_path("orca") {
+        let mut cmd = Command::new(orca);
+        if let Some(p) = path.as_deref() {
+            cmd.arg(p);
+        }
+        if platform::no_console(&mut cmd).spawn().is_ok() {
+            return true;
+        }
+    }
     if let Some(code) = platform::find_on_path("code") {
         let mut cmd = Command::new(code);
         if let Some(p) = path.as_deref() {
@@ -355,6 +417,15 @@ fn diff_file(path: &str) -> Option<&std::path::Path> {
 #[tauri::command]
 fn open_file_in_vscode(path: String) -> bool {
     let Some(file) = diff_file(&path) else { return false };
+    if let Some(orca) = platform::find_on_path("orca") {
+        let mut cmd = Command::new(orca);
+        cmd.arg(file);
+
+
+        if platform::no_console(&mut cmd).spawn().is_ok() {
+            return true;
+        }
+    }
     if let Some(code) = platform::find_on_path("code") {
         let mut cmd = Command::new(code);
         cmd.arg(file);
@@ -804,6 +875,11 @@ pub fn run() {
         .manage(shortcuts::Registry::default())
         .manage(recap::load())
         .invoke_handler(tauri::generate_handler![
+            orca_snapshot,
+            orca_completion,
+            codex_message,
+            codex_children,
+            open_orca,
             boot,
             save_settings,
             set_system_languages,
@@ -1054,3 +1130,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+
+

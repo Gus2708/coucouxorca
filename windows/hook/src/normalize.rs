@@ -98,11 +98,11 @@ pub fn fields(map: &mut Map<String, Value>, env: &dyn Fn(&str) -> Option<String>
     }
 
     if non_empty_str(map, "session_id").is_none() {
-        let sid = ["conversationId", "conversation_id", "sessionId", "GEMINI_SESSION_ID"]
+        let sid = ["conversationId", "conversation_id", "sessionId", "GEMINI_SESSION_ID", "CLAUDE_SESSION_ID"]
             .iter()
             .find_map(|k| non_empty_str(map, k))
             .map(str::to_string)
-            .or_else(|| env("GEMINI_SESSION_ID").filter(|s| !s.is_empty()));
+            .or_else(|| env("GEMINI_SESSION_ID").filter(|s| !s.is_empty())).or_else(|| env("CLAUDE_SESSION_ID").filter(|s| !s.is_empty()));
         if let Some(sid) = sid {
             map.insert("session_id".into(), Value::String(sid));
         }

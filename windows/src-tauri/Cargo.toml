@@ -14,6 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
@@ -106,3 +107,4 @@ x11rb = { version = "0.13", default-features = false, features = ["xinput", "xte
 cpal = { version = "0.18", features = ["pulseaudio"] }
 # The clipboard for Flow dictation (X11, and Wayland's data-control protocol).
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+

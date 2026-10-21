@@ -641,3 +641,71 @@ pub fn prepare_pill_window(win: &WebviewWindow, _mode: super::DesktopMode) -> bo
 pub fn set_pill_edge(_win: &WebviewWindow, _edge: &str) {}
 
 pub fn set_pill_input(_win: &WebviewWindow, _rects: Vec<(f64, f64, f64, f64)>) {}
+
+/// Restore the visible window owned by this exact desktop executable.
+/// Windows may deny foreground permission; only confirmed focus is success.
+pub fn activate_application(executable: &std::path::Path) -> bool {
+    use ::windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use ::windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
+        SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
+    struct Search {
+        path: String,
+        window: HWND,
+    }
+    unsafe extern "system" fn visit(window: HWND, data: LPARAM) -> BOOL {
+        let search = unsafe { &mut *(data.0 as *mut Search) };
+        if !unsafe { IsWindowVisible(window) }.as_bool() {
+            return BOOL(1);
+        }
+        let mut pid = 0;
+        unsafe {
+            GetWindowThreadProcessId(window, Some(&mut pid));
+        }
+        let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
+        else {
+            return BOOL(1);
+        };
+        let mut buffer = vec![0u16; 32768];
+        let mut length = buffer.len() as u32;
+        let found = unsafe {
+            QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                ::windows::core::PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            )
+        }
+        .is_ok()
+            && String::from_utf16_lossy(&buffer[..length as usize])
+                .eq_ignore_ascii_case(&search.path);
+        unsafe {
+            let _ = CloseHandle(process);
+        }
+        if found {
+            search.window = window;
+            BOOL(0)
+        } else {
+            BOOL(1)
+        }
+    }
+    let mut search = Search {
+        path: executable.to_string_lossy().replace('/', "\\"),
+        window: HWND::default(),
+    };
+    unsafe {
+        let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize));
+        if search.window == HWND::default() {
+            return false;
+        }
+        let _ = ShowWindow(search.window, SW_RESTORE);
+        if GetForegroundWindow() == search.window {
+            return true;
+        }
+        SetForegroundWindow(search.window).as_bool() && GetForegroundWindow() == search.window
+    }
+}

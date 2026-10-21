@@ -23,6 +23,9 @@ pub struct Settings {
     pub active_integrations: Vec<String>,
     /// The always-on workspace pill (src/core/pills.ts checks it is one).
     pub main_pill: String,
+    /// Canonical Git worktree root selected in the island.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub active_project_id: String,
     /// "primary" = the main display, "cursor" = whichever display the mouse is on.
     pub screen: String,
     pub autostart: bool,
@@ -57,6 +60,8 @@ pub struct Settings {
     /// season), "none" or an outfit id — the Mac's raw values. The island reads
     /// anything it doesn't know as "auto", so the value is stored as it comes.
     pub mochi_outfit: String,
+    /// Skin for the principal Mochi; worker Mochis use their detected provider.
+    pub principal_skin: String,
     /// A colour of the user's own for a pill's Mochi, by pill ID ("#RRGGBB"),
     /// picked in Settings → Active pills. Empty means the catalog's colours.
     /// Kept as it comes, like `mochi_outfit`: src/core/pill-colors.ts reads
@@ -137,6 +142,7 @@ impl Default for Settings {
                 "integration_github".into(),
             ],
             main_pill: "integration_claude".into(),
+            active_project_id: String::new(),
             screen: "primary".into(),
             autostart: false,
             hooks_installed: false,
@@ -151,6 +157,7 @@ impl Default for Settings {
             custom_url: String::new(),
             shortcuts: Default::default(),
             mochi_outfit: "auto".into(),
+            principal_skin: "classic".into(),
             pill_colors: BTreeMap::new(),
             language: String::new(),
             desktop_mochi: DesktopMochiPref::default(),
@@ -439,6 +446,7 @@ mod tests {
   "customUrl": "https://llm.example.com",
   "shortcuts": { "openChat": { "keys": "Ctrl+Shift+K", "enabled": false } },
   "mochiOutfit": "witchHat",
+  "principalSkin": "codex",
   "pillColors": { "integration_claude": "#2DD4BF" },
   "language": "pt-BR",
   "desktopMochi": { "onDesktop": true, "spot": { "x": 1500.5, "y": -300.0, "space": "screen" } },
@@ -526,6 +534,15 @@ mod tests {
         }
         assert_eq!(names(&dir), ["settings.json"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn principal_skin_defaults_for_old_settings_and_round_trips() {
+        assert_eq!(parse(br#"{}"#).unwrap().principal_skin, "classic");
+        let loaded = parse(&custom_with("principalSkin", Some(json!("claude")))).unwrap();
+        assert_eq!(loaded.principal_skin, "claude");
+        let saved = serde_json::to_vec(&loaded).unwrap();
+        assert_eq!(parse(&saved).unwrap().principal_skin, "claude");
     }
 
     #[test]
@@ -915,6 +932,17 @@ mod tests {
         save_to(&file, &settings).unwrap();
         assert_eq!(shown(&load_from(&file)), custom());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn selected_project_is_saved_while_the_empty_default_stays_omitted() {
+        assert!(serde_json::to_value(Settings::default()).unwrap().get("activeProjectId").is_none());
+
+        let settings = Settings { active_project_id: "C:\\work\\repo".into(), ..Settings::default() };
+        let written = serde_json::to_value(&settings).unwrap();
+        assert_eq!(written["activeProjectId"], "C:\\work\\repo");
+        let loaded: Settings = serde_json::from_value(written).unwrap();
+        assert_eq!(loaded.active_project_id, "C:\\work\\repo");
     }
 
     #[test]
