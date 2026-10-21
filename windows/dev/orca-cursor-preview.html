@@ -1,0 +1,6 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Orca actual cursor diagnostic</title><style>#cursor-proof{position:fixed;z-index:10000;pointer-events:none;width:14px;height:14px;border:2px solid #ffc561;border-radius:50%;transform:translate(-50%,-50%)}#cursor-proof:after{content:'Cursor';position:absolute;color:#ffc561;font:12px system-ui;top:17px;left:0}#proof-label{position:fixed;top:240px;left:24px;color:#dae0e5;font:14px system-ui}</style></head><body><div id="root"></div><div id="cursor-proof"></div><div id="proof-label">Actual Island mousemove to smoothed yaw. Diagnostic preview.</div><script type="module">
+import '/src/style.css';import {State} from '/src/core/state.ts';import {Island} from '/src/island/island.ts';
+State.settings.soundEnabled=false;State.settings.orcaSkin=true;State.loadIntegrationTasks();State.isPinned=true;
+const island=new Island(document.querySelector('#root'));island.applySettings();island.followPageCursor();island.alert('overview');
+window.addEventListener('mousemove',e=>{const cursor=document.querySelector('#cursor-proof');cursor.style.left=e.clientX+'px';cursor.style.top=e.clientY+'px'});window.cursorFixture={State,island};
+</script></body></html>

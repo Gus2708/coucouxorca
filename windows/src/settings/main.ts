@@ -4,7 +4,7 @@
 
 import "./settings.css";
 import { Bridge, onEvent, type HookStatus } from "../core/bridge";
-import { DEFAULT_SETTINGS, type Settings } from "../core/state";
+import { DEFAULT_SETTINGS, principalSkin, type Settings } from "../core/state";
 import { h, clear } from "../views/dom";
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
@@ -19,10 +19,11 @@ async function save() {
 // ── Reusable bits ─────────────────────────────────────────────────────────────
 
 function toggle(on: boolean, onChange: (v: boolean) => void): HTMLElement {
-  const el = h("button", { class: on ? "switch on" : "switch", "aria-pressed": on });
+  const el = h("button", { class: on ? "switch on" : "switch", "aria-pressed": String(on) });
   el.addEventListener("click", () => {
     const next = !el.classList.contains("on");
     el.classList.toggle("on", next);
+    el.setAttribute("aria-pressed", String(next));
     onChange(next);
   });
   return el;
@@ -392,10 +393,23 @@ function generalSection(): HTMLElement {
     void save();
   });
 
+  const skin = h("select", { "aria-label": "Principal skin" }) as HTMLSelectElement;
+  for (const name of ["classic", "orca", "antigravity", "codex", "claude"] as const) skin.append(h("option", {value:name, text:name === "antigravity" ? "Antigravity" : name[0].toUpperCase()+name.slice(1)}));
+  skin.value = principalSkin(settings);
+  skin.addEventListener("change", () => {
+    settings.principalSkin = skin.value as Settings["principalSkin"];
+    settings.orcaSkin = skin.value === "orca";
+    void save();
+  });
   return h(
     "section",
     {},
     h("h2", {}, h("span", { text: "General" })),
+    h("div", { class: "row" },
+      h("label", { text: "Principal skin" }),
+      skin,
+      h("span", { class: "hint", text: "Subagents automatically use their provider skin" }),
+    ),
     h("div", { class: "row" },
       h("label", { text: "Sound" }),
       toggle(settings.soundEnabled, (v) => { settings.soundEnabled = v; void save(); }),
@@ -413,6 +427,44 @@ function generalSection(): HTMLElement {
     h("div", { class: "row" },
       h("label", { text: "Launch at startup" }),
       toggle(settings.autostart, (v) => { settings.autostart = v; void save(); }),
+    ),
+  );
+}
+
+function workspaceSection(): HTMLElement {
+  const nameInput = h("input", {
+    type: "text",
+    value: settings.workspaceName || "Orca",
+    style: "width:140px",
+  }) as HTMLInputElement;
+  nameInput.addEventListener("change", () => {
+    settings.workspaceName = nameInput.value.trim() || "Orca";
+    void save();
+  });
+
+  const colorInput = h("input", {
+    type: "color",
+    value: settings.workspaceColor || "#f5f6f8",
+    style: "width:36px;height:26px;padding:0;border:1px solid rgba(255,255,255,0.2);border-radius:4px;background:none;cursor:pointer",
+  }) as HTMLInputElement;
+  colorInput.addEventListener("input", () => {
+    settings.workspaceColor = colorInput.value;
+    void save();
+  });
+
+  return h(
+    "section",
+    {},
+    h("h2", {}, h("span", { text: "Orchestrator & Workspace" })),
+    h("div", { class: "row" },
+      h("label", { text: "Tool name" }),
+      nameInput,
+      h("span", { class: "hint", text: "Primary orchestrator label (e.g. Orca)" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Theme color" }),
+      colorInput,
+      h("span", { class: "hint", text: "Primary color for Mochi and task badge" }),
     ),
   );
 }
@@ -442,6 +494,7 @@ async function main() {
   root.append(
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
+    workspaceSection(),
     apiSection(hasKey),
     integrationsSection(present),
     generalSection(),

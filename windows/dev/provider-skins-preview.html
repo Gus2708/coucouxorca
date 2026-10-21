@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Provider skin preview</title><style>body{background:#202225;color:#eceef0;font:14px system-ui;margin:24px}h1{font-size:22px}section{display:flex;gap:12px;margin-bottom:12px}article{width:150px;text-align:center}h2{font-size:15px;margin:4px}canvas{display:block;margin:auto}label{margin-right:16px}</style></head><body><h1>Provider skins - actual animated Canvas engine</h1><label>Principal skin <select id="skin"><option>classic</option><option>orca</option><option>antigravity</option><option>codex</option><option>claude</option></select></label><span>Subagents follow their exact provider independently</span><div id="states"></div><script type="module">
+import {BotEngine} from '/src/mochi/engine.ts';
+const target=document.createElement('div');target.style.cssText='position:fixed;pointer-events:none;z-index:10;color:#fff;font-size:12px;transform:translate(5px,5px)';target.innerHTML='<svg width="18" height="22" viewBox="0 0 18 22"><path d="M1 1L15 13L8 14L5 21Z" fill="white" stroke="#17181c" stroke-width="1.5"/></svg> Cursor';document.body.append(target);
+const engines=[];
+for(const skin of ['antigravity','codex','claude']){
+ const section=document.createElement('section');
+ for(const state of ['idle','thinking','working','finished']){
+  const article=document.createElement('article');article.innerHTML=`<h2>${skin} / ${state}</h2>`;
+  for(const mini of [false,true]){const size=mini?48:140;const canvas=document.createElement('canvas');canvas.width=size*2;canvas.height=size*2;canvas.style.width=size+'px';canvas.style.height=size+'px';article.append(canvas);const engine=new BotEngine();engine.isMini=mini;engine.setSkin(skin);engine.setState(state,true);engines.push({engine,canvas,size});}
+  section.append(article);
+ }
+ document.querySelector('#states').append(section);
+}
+function paint(dt=0){for(const {engine,canvas,size} of engines){if(dt)engine.update(dt);const x=canvas.getContext('2d');x.setTransform(2,0,0,2,0,0);x.clearRect(0,0,size,size);engine.draw(x,size,size)}}paint();
+window.providerFixture={engines,paint};
+document.querySelector('#skin').onchange=e=>{BotEngine.setPrincipalSkin(e.target.value);paint()};
+window.addEventListener('pointermove',e=>{target.style.left=e.clientX+'px';target.style.top=e.clientY+'px';for(const {engine,canvas} of engines){const rect=canvas.getBoundingClientRect();engine.lookX=Math.tanh((e.clientX-rect.x-rect.width/2)/220);engine.lookY=Math.tanh((e.clientY-rect.y-rect.height/2)/220);}});
+let last=performance.now();function frame(now){paint(Math.min(.032,(now-last)/1000));last=now;requestAnimationFrame(frame)}requestAnimationFrame(frame);
+</script></body></html>

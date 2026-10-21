@@ -1,11 +1,13 @@
 // Coucou for Windows — app wiring and the commands the island calls.
 
 mod claude;
+mod codex;
 mod files;
 mod hooks;
 mod integrations;
 mod island;
 mod log;
+mod orca;
 mod pipe;
 mod platform;
 mod secrets;
@@ -18,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use claude::{Chat, ChatContext, ChatReply};
 use files::DroppedFile;
@@ -30,6 +32,57 @@ use settings::Settings;
 pub struct Shared {
     pub settings: Mutex<Settings>,
     pub gate: Arc<PollGate>,
+}
+
+#[tauri::command]
+async fn orca_snapshot(run_id: Option<String>) -> Result<orca::Snapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || orca::snapshot(run_id))
+        .await
+        .map_err(|_| "Orca telemetry worker stopped".to_string())?
+}
+
+#[tauri::command]
+async fn orca_completion(dispatch_id: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || orca::completion(dispatch_id))
+        .await
+        .map_err(|_| "Orca result reader stopped".to_string())?
+}
+
+#[tauri::command]
+async fn codex_children(
+    transcript_path: String,
+    session_id: String,
+) -> Result<Vec<codex::Child>, String> {
+    tauri::async_runtime::spawn_blocking(move || codex::read_children(transcript_path, session_id))
+        .await
+        .map_err(|_| "Codex child reader stopped".to_string())
+}
+
+#[tauri::command]
+async fn codex_message(
+    transcript_path: String,
+    session_id: String,
+    turn_id: String,
+) -> Result<Option<codex::Message>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        codex::read_message(transcript_path, session_id, turn_id)
+    })
+    .await
+    .map_err(|_| "Codex response reader stopped".to_string())?
+}
+
+#[tauri::command]
+async fn open_orca(
+    terminal_handle: Option<String>,
+    coordinator_handle: Option<String>,
+) -> Result<orca::OpenResult, String> {
+    // Attempt foreground activation directly from the user action before scheduling CLI work.
+    let _ = orca::activate_desktop();
+    tauri::async_runtime::spawn_blocking(move || {
+        orca::open_terminal(terminal_handle, coordinator_handle)
+    })
+    .await
+    .map_err(|_| "Orca could not be opened".to_string())?
 }
 
 #[derive(Serialize)]
@@ -73,7 +126,11 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     }
     if autostart_changed {
         let manager = app.autolaunch();
-        let result = if settings.autostart { manager.enable() } else { manager.disable() };
+        let result = if settings.autostart {
+            manager.enable()
+        } else {
+            manager.disable()
+        };
         if let Err(err) = result {
             eprintln!("[coucou] autostart: {err}");
         }
@@ -91,6 +148,7 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
 #[tauri::command]
 fn set_collapsed(app: AppHandle, shared: State<Shared>, collapsed: bool) {
     let pref = shared.settings.lock().unwrap().screen.clone();
+    log::line(format!("set_collapsed: collapsed={collapsed}, pref={pref}"));
     shared.gate.collapsed.store(collapsed, Ordering::Relaxed);
     island::apply_geometry(&app, &pref, collapsed);
     // The wake strip must always take the mouse, and a resize invalidates the flag.
@@ -101,7 +159,12 @@ fn set_collapsed(app: AppHandle, shared: State<Shared>, collapsed: bool) {
 /// The front end pushes the island shape; Rust decides click-through from it.
 #[tauri::command]
 fn set_island_rect(app: AppHandle, shared: State<Shared>, x: f64, y: f64, width: f64, height: f64) {
-    shared.gate.set_rect(island::IslandRect { x, y, w: width, h: height });
+    shared.gate.set_rect(island::IslandRect {
+        x,
+        y,
+        w: width,
+        h: height,
+    });
     // Without the cursor poll the input region is the click-through: it follows the island.
     if !platform::CURSOR_POLL {
         island::refresh_click_through(&app, &shared.gate);
@@ -110,7 +173,9 @@ fn set_island_rect(app: AppHandle, shared: State<Shared>, x: f64, y: f64, width:
 
 #[tauri::command]
 fn focus_window(app: AppHandle, focused: bool) {
-    let Some(win) = island::window(&app) else { return };
+    let Some(win) = island::window(&app) else {
+        return;
+    };
     platform::set_activating(&win, focused);
     if focused {
         let _ = win.set_focus();
@@ -148,6 +213,15 @@ fn open_in_vscode(path: Option<String>) -> bool {
         let p = std::path::Path::new(p);
         if !(p.is_absolute() && p.is_dir()) {
             return false;
+        }
+    }
+    if let Some(orca) = platform::find_on_path("orca") {
+        let mut cmd = Command::new(orca);
+        if let Some(p) = path.as_deref() {
+            cmd.arg(p);
+        }
+        if platform::no_console(&mut cmd).spawn().is_ok() {
+            return true;
         }
     }
     if let Some(code) = platform::find_on_path("code") {
@@ -367,7 +441,10 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             let _ = app.emit_to(island::WINDOW_LABEL, "tray", "open".to_string());
         }))
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(Shared {
             settings: Mutex::new(loaded.clone()),
             gate: gate.clone(),
@@ -376,6 +453,11 @@ pub fn run() {
         .manage(Chat::default())
         .invoke_handler(tauri::generate_handler![
             boot,
+            orca_snapshot,
+            orca_completion,
+            codex_message,
+            codex_children,
+            open_orca,
             save_settings,
             set_collapsed,
             set_island_rect,
@@ -412,6 +494,10 @@ pub fn run() {
                 platform::make_non_activating(&win);
                 island::apply_geometry(&handle, &loaded.screen, false);
                 let _ = win.show();
+                log::line(format!(
+                    "island window url: {:?}",
+                    win.url().map(|u| u.to_string())
+                ));
             }
             gate.collapsed.store(false, Ordering::Relaxed);
             // Nothing drawn yet, so nothing takes the mouse until the page
@@ -422,7 +508,10 @@ pub fn run() {
             gate.set_active(true);
             island::spawn_cursor_poll(handle.clone(), gate.clone());
 
-            log::line(format!("--- Coucou {} started ---", env!("CARGO_PKG_VERSION")));
+            log::line(format!(
+                "--- Coucou {} started ---",
+                env!("CARGO_PKG_VERSION")
+            ));
             hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
             integrations::start(handle.clone());

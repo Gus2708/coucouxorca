@@ -1,0 +1,15 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Ticker layout test</title></head>
+<body style="background:#0b0c0e"><div id="fixture" style="width:322px;margin:30px;height:100px;padding-top:20px"></div>
+<script type="module">
+import "../src/style.css";
+import { Ticker } from "../src/views/ticker.ts";
+const ticker = new Ticker();
+const task = { steps: ["Read · C:/Projects/Portfolio/src/first-long-file.ts", "Run · G:/Projects/Portfolio/npm-build-with-a-long-command"], stepIndex: 1 };
+ticker.sync(task);
+document.querySelector("#fixture").append(ticker.el);
+window.tickerFixture = {
+  next() { task.steps.push("Write · C:/Projects/Portfolio/src/another-long-file.ts"); task.stepIndex++; ticker.sync(task); },
+  tick(ms) { ticker.tick(ms); },
+};
+</script></body></html>

@@ -1,0 +1,5 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Settings preview</title></head><body><div id="settings-root"></div><script type="module">
+import {Bridge} from '/src/core/bridge.ts';
+Bridge.boot=async()=>undefined;Bridge.hooksStatus=async()=>({installed:false,settingsPath:'',hookPath:'',hookReady:false});Bridge.secretPresent=async()=>false;Bridge.saveSettings=async settings=>{window.savedSkinSettings=structuredClone(settings)};
+await import('/src/settings/main.ts');
+</script></body></html>

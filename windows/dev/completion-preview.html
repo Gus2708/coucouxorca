@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Completion UI diagnostic</title></head>
+<body><div id="root"></div><script type="module">
+import "../src/style.css";
+import { State } from "../src/core/state.ts";
+import { Island } from "../src/island/island.ts";
+State.settings.soundEnabled = false;
+State.loadIntegrationTasks();
+const island = new Island(document.querySelector("#root"));
+const run = { id: "diagnostic_run", objective: "Local UI diagnostic", coordinatorHandle: "diagnostic_root" };
+State.syncOrca({ runs: [run], selectedRun: run, coordinator: { handle: run.coordinatorHandle, connected: true, cwd: "C:/diagnostic" }, workers: [{ id: "diagnostic_child", name: "Diagnostic child", state: "working", cwd: "C:/diagnostic", terminalHandle: "diagnostic_child", provider: "codex" }] });
+State.updateTask("integration_claude", "finished");
+State.setFinalSummary("integration_claude", "Desplegado en https://gusdev.me al primer intento. La comprobación final confirma la respuesta esperada y todos los cambios solicitados.\n\nSecond paragraph should not appear.");
+State.updateTask("orca_diagnostic_child", "finished");
+State.setFinalSummary("orca_diagnostic_child", "Child response: " + "A readable completed result with verified evidence and a deliberately long URL https://example.test/long_path. ".repeat(18));
+island.alert("overview");
+window.completionFixture = { State, island, principal() { State.setFocus("integration_claude"); island.setView("finished"); }, overview() { island.setView("overview"); } };
+</script></body></html>

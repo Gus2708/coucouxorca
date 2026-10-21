@@ -164,7 +164,54 @@ const FONT = `system-ui, "Segoe UI Variable Text", "Segoe UI", sans-serif`;
 
 // ── Engine ────────────────────────────────────────────────────────────────────
 
+/** Markings share the animated eye projection instead of trailing the gaze. */
+export function orcaLandmarks(yaw: number, pitch: number, roll: number, rx: number, ry: number, morph = 0) {
+  const eyePitch = EYE_P + pitch + roll;
+  const eyes = [-1, 1].map(side => ({
+    x: Math.sin(side * EYE_SP + yaw) * Math.cos(eyePitch) * rx,
+    y: -Math.sin(eyePitch) * ry + ry * 0.14 * morph,
+  }));
+  const restY = -Math.sin(EYE_P) * ry;
+  const patches = eyes.map((eye, index) => {
+    const side = index === 0 ? -1 : 1;
+    const restX = Math.sin(side * EYE_SP) * Math.cos(EYE_P) * rx;
+    return { x: side * rx * 0.65 + eye.x - restX, y: ry * 0.06 + eye.y - restY };
+  });
+  const shiftX = (eyes[0].x + eyes[1].x) * 0.5 * 0.35;
+  const shiftY = (eyes[0].y - restY) * 0.35;
+  return { eyes, patches,
+    // Side fins have perspective depth; the far fin tucks behind the body.
+    fins: [-1, 1].map(side => ({
+      x: Math.sin(side * 1.35 + yaw) * rx * 1.08,
+      y: ry * 0.68 + shiftY,
+      scale: 0.5 + Math.max(0, Math.cos(side * 1.35 + yaw)) * 0.5,
+    })),
+    face: { x: shiftX * 1.45, y: shiftY * 0.85, scaleX: 1 - Math.abs(Math.sin(yaw)) * 0.1 },
+    // The dorsal is on the back, so its parallax opposes the front of the face.
+    dorsal: { x: -Math.sin(yaw) * rx * 0.3, y: shiftY * 0.65 },
+  };
+}
+
+export type AvatarSkin = "classic" | "orca" | "antigravity" | "codex" | "claude";
+/** Only Orca's published provider identity selects a child skin. */
+export function providerSkin(provider?: string | null): AvatarSkin {
+  return provider === "claude" || provider === "codex" || provider === "antigravity" ? provider : "classic";
+}
+
+/** A mini badge stays within its avatar slot even during bounce/stretch. */
+export function miniBadgeAnchor(R: number, cx: number, cy: number, sx: number, sy: number) {
+  const center = R / 0.6;
+  return {x: Math.max(center - R * .55, Math.min(center + R * .55, cx - R * .72 * sx)),
+    y: Math.max(center - R * .55, Math.min(center + R * .55, cy - R * .72 * sy))};
+}
+
 export class BotEngine {
+  private static principalSkin: AvatarSkin = "classic";
+  private skinOverride: AvatarSkin | null = null;
+  static setPrincipalSkin(skin: AvatarSkin) { BotEngine.principalSkin = skin; }
+  static setOrcaSkin(enabled: boolean) { BotEngine.setPrincipalSkin(enabled ? "orca" : "classic"); }
+  setSkin(skin: AvatarSkin) { this.skinOverride = skin; }
+  get skin(): AvatarSkin { return this.skinOverride ?? BotEngine.principalSkin; }
   isMini = false;
   /** Solid body colour for mini bots / integration pills (null = Mochi gradient). */
   bodyColor: RGB | null = null;
@@ -647,13 +694,14 @@ export class BotEngine {
     const cx = W / 2 + this.ox * R;
     const cy = H / 2 + this.particleOverhang / 2 + this.oy * R + R * 0.06;
 
-    this.drawHandsBehind(x, R, rx, ry, cx, cy);
+    if (this.skin === "classic") this.drawHandsBehind(x, R, rx, ry, cx, cy);
 
     x.save();
     x.translate(cx, cy);
     if (this.tilt !== 0) x.rotate(this.tilt);
     x.scale(this.sx, this.sy);
 
+    if (this.skin === "orca") this.drawOrcaFins(x, R, rx, ry);
     const body = this.bodyPath(rx, ry, R);
     this.drawBody(x, body, R, rx, ry);
 
@@ -672,7 +720,7 @@ export class BotEngine {
     }
 
     this.drawEyes(x, body, R, rx, ry);
-    if (this.morph > 0.05) this.drawMouth(x, body, R);
+    if (this.skin === "classic" && this.morph > 0.05) this.drawMouth(x, body, R);
 
     x.restore();
 
@@ -703,6 +751,11 @@ export class BotEngine {
         px = lerp(px0, rr.x, m);
         py = lerp(py0, rr.y, m);
       }
+      if (this.skin !== "classic" && this.skin !== "orca") {
+        const face = orcaLandmarks(this.yaw, this.pitch, this.roll, rx, ry, this.morph).face;
+        px = px * 0.82 * face.scaleX + face.x;
+        py = py * 0.76 + ry * 0.08 + face.y;
+      }
       if (i === 0) p.moveTo(px, py);
       else p.lineTo(px, py);
     }
@@ -710,7 +763,100 @@ export class BotEngine {
     return p;
   }
 
+  private drawOrcaFins(x: CanvasRenderingContext2D, R: number, rx: number, ry: number) {
+    const g = x.createLinearGradient(0, -ry * 1.35, 0, ry);
+    g.addColorStop(0, "#535454"); g.addColorStop(1, "#202222");
+    const landmarks = orcaLandmarks(this.yaw, this.pitch, this.roll, rx, ry, this.morph);
+    x.save(); x.translate(landmarks.dorsal.x, landmarks.dorsal.y);
+    x.fillStyle = g;
+    x.beginPath();
+    x.moveTo(-R * 0.18, -ry * 0.9);
+    x.bezierCurveTo(-R * 0.1, -ry * 1.43, R * 0.28, -ry * 1.46, R * 0.25, -ry * 0.9);
+    x.closePath(); x.fill(); x.restore();
+    for (const [index, side] of [-1, 1].entries()) {
+      x.save(); x.translate(landmarks.fins[index].x, landmarks.fins[index].y);
+      x.rotate(-side * 0.45);
+      x.scale(landmarks.fins[index].scale, landmarks.fins[index].scale);
+      x.beginPath(); x.ellipse(0, 0, R * 0.15, R * 0.27, 0, 0, Math.PI * 2);
+      x.fillStyle = "#dedbd1"; x.fill(); x.restore();
+    }
+  }
+
+  private drawOrcaBody(x: CanvasRenderingContext2D, body: Path2D, R: number, rx: number, ry: number) {
+    x.save(); x.clip(body);
+    const cap = x.createLinearGradient(0, -ry, 0, ry);
+    cap.addColorStop(0, "#505252"); cap.addColorStop(0.35, "#2c2f2f"); cap.addColorStop(1, "#191c1d");
+    x.fillStyle = cap; x.fill(body);
+    const landmarks = orcaLandmarks(this.yaw, this.pitch, this.roll, rx, ry, this.morph);
+    x.save(); x.translate(landmarks.face.x, landmarks.face.y);
+    x.scale(landmarks.face.scaleX, 1);
+    const face = x.createLinearGradient(-rx * 0.4, -ry * 0.55, rx * 0.7, ry);
+    face.addColorStop(0, "#fffdf5"); face.addColorStop(0.65, "#ede9df"); face.addColorStop(1, "#c5c1b8");
+    x.fillStyle = face; x.beginPath();
+    x.moveTo(-rx, ry * 0.5);
+    x.bezierCurveTo(-rx * 1.02, -ry * 0.18, -rx * 0.79, -ry * 0.83, -rx * 0.42, -ry * 0.67);
+    x.bezierCurveTo(-rx * 0.17, -ry * 0.51, rx * 0.17, -ry * 0.51, rx * 0.42, -ry * 0.67);
+    x.bezierCurveTo(rx * 0.79, -ry * 0.83, rx * 1.02, -ry * 0.18, rx, ry * 0.5);
+    x.lineTo(rx, ry * 1.2); x.lineTo(-rx, ry * 1.2); x.closePath(); x.fill();
+    x.restore();
+    for (const [index, side] of [-1, 1].entries()) {
+      x.save(); x.translate(landmarks.patches[index].x, landmarks.patches[index].y);
+      x.rotate(-side * 0.25);
+      x.fillStyle = "#272929"; x.beginPath();
+      x.ellipse(0, 0, R * 0.17, R * 0.28, 0, 0, Math.PI * 2); x.fill(); x.restore();
+    }
+    x.restore();
+  }
+
+  /** Provider capuchas keep the existing projected eyes, morph and emotes. */
+  private drawProviderBody(x: CanvasRenderingContext2D, face: Path2D, R: number, rx: number, ry: number) {
+    const hood = new Path2D();
+    const pose = orcaLandmarks(this.yaw, this.pitch, this.roll, rx, ry, this.morph).face;
+    const dx = pose.x * 0.35, dy = pose.y * 0.35;
+    if (this.skin === "antigravity") {
+      hood.moveTo(-rx * 1.12 + dx, ry * 0.72 + dy);
+      hood.bezierCurveTo(-rx * 1.04 + dx, ry * 0.25 + dy, -rx * 0.78 + dx, -ry * 1.4 + dy, 0 + dx, -ry * 1.4 + dy);
+      hood.bezierCurveTo(rx * 0.78 + dx, -ry * 1.4 + dy, rx * 1.04 + dx, ry * 0.25 + dy, rx * 1.12 + dx, ry * 0.72 + dy);
+      hood.bezierCurveTo(rx * 1.28 + dx, ry * 1.05 + dy, rx * 0.86 + dx, ry * 1.07 + dy, rx * 0.84 + dx, ry * 0.89 + dy);
+      hood.bezierCurveTo(rx * 0.57 + dx, ry * 1.2 + dy, -rx * 0.57 + dx, ry * 1.2 + dy, -rx * 0.84 + dx, ry * 0.89 + dy);
+      hood.bezierCurveTo(-rx * 0.86 + dx, ry * 1.07 + dy, -rx * 1.28 + dx, ry * 1.05 + dy, -rx * 1.12 + dx, ry * 0.72 + dy);
+    } else {
+      hood.roundRect(-rx + dx, -ry * 1.08 + dy, rx * 2, ry * 2.2, R * 0.68);
+      if (this.skin === "codex") {
+        for (const [hx, hy, radius] of [[-0.73,-0.4,.48],[-.38,-.93,.53],[.35,-.82,.49],[.73,-.1,.48],[.34,.57,.46],[-.55,.55,.42]]) {
+          hood.moveTo(hx * rx + dx + radius * R, hy * ry + dy);
+          hood.ellipse(hx * rx + dx, hy * ry + dy, radius * R, radius * R, 0, 0, Math.PI * 2);
+        }
+      } else {
+        // Short, rounded sun rays; the lower silhouette stays softly grounded.
+        for (let i = 0; i < 7; i++) {
+          const a = Math.PI + i * Math.PI / 6;
+          const hx = Math.cos(a) * rx * .96 + dx, hy = Math.sin(a) * ry * 1.05 + dy;
+          hood.moveTo(hx + R * .17, hy);
+          hood.ellipse(hx, hy, R * .18, R * .35, a + Math.PI / 2, 0, Math.PI * 2);
+        }
+      }
+    }
+    hood.closePath();
+    x.save(); x.shadowColor = "rgba(0,0,0,.22)"; x.shadowBlur = R * .1; x.shadowOffsetY = R * .07;
+    const g = x.createLinearGradient(-rx * .85, -ry * 1.25, rx * .75, ry);
+    const colors = this.skin === "claude" ? [[0,"#ffc08e"],[.4,"#ec8656"],[1,"#a84126"]] : this.skin === "codex" ? [[0,"#91d8ff"],[.3,"#6484ff"],[.62,"#a885ff"],[1,"#233ce6"]] : [[0,"#72ead4"],[.2,"#fff27b"],[.43,"#ff8a77"],[.63,"#9699fa"],[1,"#0069ee"]];
+    for (const [stop,color] of colors) g.addColorStop(stop as number, color as string);
+    x.fillStyle = g; x.fill(hood); x.restore();
+    if (this.skin === "antigravity") {
+      x.save(); x.clip(hood);
+      const blue = x.createLinearGradient(0,-ry*.65,0,ry*1.15);
+      blue.addColorStop(0,"rgba(0,130,255,0)"); blue.addColorStop(.5,"rgba(0,130,255,.6)"); blue.addColorStop(1,"#0754d9");
+      x.fillStyle = blue; x.fill(hood); x.restore();
+    }
+    const white = x.createLinearGradient(-rx*.4,-ry*.5,rx*.6,ry);
+    white.addColorStop(0,"#fffefa"); white.addColorStop(.72,"#f1efec"); white.addColorStop(1,this.skin === "claude" ? "#dbc6b0" : "#d6dced");
+    x.fillStyle = white; x.fill(face);
+  }
+
   private drawBody(x: CanvasRenderingContext2D, body: Path2D, R: number, rx: number, ry: number) {
+    if (this.skin === "orca") { this.drawOrcaBody(x, body, R, rx, ry); return; }
+    if (this.skin !== "classic") { this.drawProviderBody(x, body, R, rx, ry); return; }
     if (this.bodyColor) {
       // Mini bots: flat solid fill — no gradient, no reflection, no highlight
       x.fillStyle = rgba(this.bodyColor, 1);
@@ -759,6 +905,7 @@ export class BotEngine {
     x.fillStyle = ink;
     x.strokeStyle = ink;
 
+    const landmarks = this.skin !== "classic" ? orcaLandmarks(this.yaw, this.pitch, this.roll, rx, ry, this.morph) : null;
     for (const sd of [-1, 1]) {
       const eyeYaw = sd * EYE_SP + this.yaw;
       let eyePitch = EYE_P + this.pitch + this.roll;
@@ -766,8 +913,9 @@ export class BotEngine {
       const cp = Math.cos(eyePitch);
       if (Math.cos(eyeYaw) * cp <= 0.04) continue;
 
-      const ex = Math.sin(eyeYaw) * cp * rx;
-      const ey = -Math.sin(eyePitch) * ry + (this.morph > 0 ? ry * 0.14 * this.morph : 0);
+      const eye = landmarks?.eyes[sd < 0 ? 0 : 1];
+      const ex = eye?.x ?? Math.sin(eyeYaw) * cp * rx;
+      const ey = eye?.y ?? (-Math.sin(eyePitch) * ry + (this.morph > 0 ? ry * 0.14 * this.morph : 0));
       const fx = lerp(Math.max(0.18, Math.cos(eyeYaw)), 1, this.morph * 0.7);
       const fy = lerp(Math.max(0.18, cp), 1, this.morph * 0.7);
       const eyeMult = this.isMini ? 1.9 : 1.0;
@@ -1003,8 +1151,8 @@ export class BotEngine {
 
   private drawBadge(x: CanvasRenderingContext2D, badge: Badge, R: number, cx: number, cy: number) {
     const bs = this.badgeS * (this.isMini ? 1.25 : 1);
-    const bx = cx - R * 0.72 * this.sx;
-    const by = cy - R * 0.72 * this.sy;
+    const anchor = this.isMini ? miniBadgeAnchor(R, cx, cy, this.sx, this.sy) : {x: cx - R * .72 * this.sx, y: cy - R * .72 * this.sy};
+    const bx = anchor.x, by = anchor.y;
     const t = now();
 
     x.save();

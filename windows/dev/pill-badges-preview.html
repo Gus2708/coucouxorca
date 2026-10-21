@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Completion UI diagnostic</title></head>
+<body><div id="root"></div><script type="module">
+import "../src/style.css";
+import { State } from "../src/core/state.ts";
+import { Island } from "../src/island/island.ts";
+State.settings.soundEnabled = false;
+State.loadIntegrationTasks();
+const island = new Island(document.querySelector("#root"));
+const run = { id: "diagnostic_run", objective: "Local UI diagnostic", coordinatorHandle: "diagnostic_root" };
+State.syncOrca({ runs: [run], selectedRun: run, coordinator: { handle: run.coordinatorHandle, connected: true, cwd: "C:/diagnostic" }, workers: [{ id: "diagnostic_child", name: "Diagnostic child", state: "working", cwd: "C:/diagnostic", terminalHandle: "diagnostic_child", provider: "codex" }] });
+for(const [index,state] of ['thinking','working','finished'].entries()) {
+ const id='pill_'+index;const task={id:'orca_'+id,name:'Refine clean '+state,state,steps:[],stepIndex:0,parentId:'integration_claude',provider:'codex',source:'agent',isIntegration:false,color:'#60a5fa',pillBadge:state==='finished'?'finished':null};State.tasks.push(task);
+}
+island.alert('overview');window.pillFixture={State,island};
+</script></body></html>

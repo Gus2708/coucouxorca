@@ -12,7 +12,7 @@ import { ICONS } from "./icons";
 import { cubicBezier, clamp, lerp } from "../core/anim";
 import type { AgentTask } from "../core/state";
 
-const ROW_H = 22;
+const ROW_H = 24;
 /** One step transition, milliseconds. */
 const DURATION = 380;
 /** Beyond this many queued steps we stop trying to show them all. */
@@ -44,7 +44,7 @@ function makeRow(): Row {
     "div",
     { class: "ticker-row" },
     h("span", { class: "tick-icon", style: "position:relative" }, chevron, check),
-    h("span", { style: "position:relative;flex:1 1 auto;min-width:0" }, shimmer, dim),
+    h("span", { class: "tick-layers" }, shimmer, dim),
   );
   return { el, chevron, check, shimmer, dim, text: "" };
 }
@@ -78,6 +78,7 @@ export class Ticker {
   private queue: string[] = [];
   private startMs: number | null = null;
   private displayIndex = -1;
+  private observedText = "";
 
   constructor() {
     this.el = h("div", { class: "ticker" }, this.a.el, this.b.el, this.c.el);
@@ -102,6 +103,7 @@ export class Ticker {
     // First render: drop straight into place, no animation.
     if (this.displayIndex < 0) {
       this.displayIndex = idx;
+      this.observedText = steps[Math.max(idx, 0)];
       setText(this.a, idx > 0 ? steps[idx - 1] : "…");
       setText(this.b, steps[Math.max(idx, 0)]);
       this.rest();
@@ -113,13 +115,19 @@ export class Ticker {
       this.queue = [];
       this.startMs = null;
       this.displayIndex = idx;
+      this.observedText = steps[Math.max(idx, 0)];
       setText(this.a, idx > 0 ? steps[idx - 1] : "…");
       setText(this.b, steps[Math.max(idx, 0)]);
       this.rest();
       return;
     }
 
+    // At the history cap appendStep shifts the array, leaving its index unchanged.
+    // Observe the newest content too, without animating unchanged state rerenders.
+    const latest = steps[Math.max(idx, 0)];
+    if (idx === this.displayIndex && latest !== this.observedText) this.queue.push(latest);
     for (let i = this.displayIndex + 1; i <= idx; i++) this.queue.push(steps[i]);
+    this.observedText = latest;
     this.displayIndex = idx;
     if (this.queue.length > MAX_QUEUE) {
       this.queue = this.queue.slice(-MAX_QUEUE);

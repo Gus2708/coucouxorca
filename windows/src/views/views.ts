@@ -16,7 +16,7 @@ export interface ViewActions {
   setView(v: IslandViewName): void;
   collapse(): void;
   setFocus(id: string): void;
-  openTerminal(): void;
+  openOrca(): void;
   /** The ↗ button: opens whatever the focused pill points at. */
   openTarget(): void;
   openUrl(url: string): void;
@@ -35,6 +35,7 @@ export interface ViewHost {
   focus?(): void;
   /** Called every frame while the view is on screen. */
   tick?(nowMs: number): void;
+  animating?(): boolean;
 }
 
 // ── Shared pieces ─────────────────────────────────────────────────────────────
@@ -84,6 +85,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
 
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.gear, 14));
   const soundBtn = h("button", { title: "Mute", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOn, 14));
+  const closeBtn = h("button", { class: "close-btn", title: "Close Notch", onclick: () => actions.collapse() }, svg(ICONS.xmark, 11));
 
   function go(v: IslandViewName) {
     actions.blip();
@@ -94,7 +96,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
     "div",
     { id: "header" },
     h("div", { class: "tabs" }, tabHome, tabChat, tabDrop),
-    h("div", { class: "header-actions" }, gearBtn, soundBtn),
+    h("div", { class: "header-actions" }, gearBtn, soundBtn, closeBtn),
   );
 
   return {
@@ -123,7 +125,7 @@ function buildOverview(actions: ViewActions): ViewHost {
   const leftBody = h("div", { class: "left-body" });
   const jump = h(
     "button",
-    { class: "icon-btn jump", title: "Open", onclick: () => actions.openTarget() },
+    { class: "icon-btn jump", title: "Open in Orca", onclick: () => { actions.openTarget(); } },
     svg(ICONS.arrowUpRight, 8),
   );
   const left = card(null, leftBody, jump);
@@ -163,8 +165,13 @@ function buildOverview(actions: ViewActions): ViewHost {
     tick(nowMs: number) {
       if (mode === "ticker") ticker.tick(nowMs);
     },
+    animating() {
+      return mode === "ticker" && ticker.animating;
+    },
     sync() {
-      const task = State.focusTask;
+      const focused = State.focusTask;
+      const focusedIsSubagent = !!focused && (focused.id.startsWith("agent_") || focused.id.startsWith("orca_") || focused.id.startsWith("native_"));
+      const task = focusedIsSubagent ? focused : State.coordinatorTask;
       if (task?.id !== lastFocus) {
         lastFocus = task?.id ?? null;
         detailOpen = false;
@@ -172,10 +179,12 @@ function buildOverview(actions: ViewActions): ViewHost {
         mode = null;
       }
 
-      // VS Code with a live Claude Code session keeps the ticker; every other
-      // pill shows its own card, exactly like IntegrationCardView.
+      // Orchestrator or active subagents keep the ticker; other pills show their integration cards
+      const isSubagent = !!task && (task.id.startsWith("agent_") || task.id.startsWith("orca_") || task.id.startsWith("native_"));
       const sessionActive =
-        task?.id === "integration_claude" && (task.state !== "idle" || task.steps.length > 0);
+        task &&
+        (task.id === "integration_claude" || isSubagent) &&
+        !State.orcaError && State.orca?.coordinator?.connected && (isSubagent || task.state !== "idle" || task.steps.length > 0);
 
       if (task && sessionActive) {
         if (mode !== "ticker") {
@@ -185,10 +194,19 @@ function buildOverview(actions: ViewActions): ViewHost {
           cardKey = "";
         }
         clear(who);
+        let toolLabel: string;
+        if (task.id === "integration_claude") {
+          toolLabel = State.coordinatorProviderLabel;
+        } else if (isSubagent) {
+          const p = task.provider?.toLowerCase();
+          toolLabel = p === "antigravity" || p === "gemini" ? "Antigravity" : p === "claude" ? "Claude" : p === "codex" ? "Codex" : (task.provider || "Orca Subagent");
+        } else {
+          toolLabel = task.source === "claudeCode" ? "Claude Code" : "n8n";
+        }
         who.append(
           dot(task.color, 7),
           h("span", { class: "name", text: task.name }),
-          h("span", { class: "tool", text: task.source === "claudeCode" ? "Claude Code" : "n8n" }),
+          h("span", { class: "tool", text: toolLabel }),
         );
         if (task.steps.length > 1) {
           who.append(h("span", {
@@ -201,7 +219,8 @@ function buildOverview(actions: ViewActions): ViewHost {
         const info = State.integrations[task.id];
         const key = [
           task.id, detailOpen, task.state, task.steps.join("|"),
-          info?.loaded, info?.error, info?.configured,
+          info?.loaded, info?.error, info?.configured, State.orcaError, State.orcaRunId,
+          State.orca?.coordinator?.connected, State.coordinatorProviderLabel, JSON.stringify(State.orca?.runs ?? []),
           JSON.stringify(info?.data ?? {}),
         ].join("~");
         if (key !== cardKey) {
@@ -212,13 +231,16 @@ function buildOverview(actions: ViewActions): ViewHost {
         }
       }
 
+      jump.title = isSubagent ? `Open ${task?.name ?? "subagent"}` : "Open coordinator";
       jump.style.display = detailOpen ? "none" : "";
 
-      const others = State.otherTasks.slice(0, 4);
-      const pillKey = others.map((t) => `${t.id}:${t.pillBadge ?? ""}`).join("|");
+      const others = State.childTasks;
+      const pillKey = `${State.orcaError ?? ""}:${others.map((t) => `${t.id}:${t.name}:${t.pillBadge ?? ""}:${t.state}:${t.id === State.focusId}`).join("|") || "empty"}`;
       if (pillKey !== pillIds) {
         pillIds = pillKey;
         clear(pills);
+        if (!others.length) pills.append(h("span", { class: "children-empty", text: State.orcaError ?? "No active subagents" }));
+        pills.classList.toggle("telemetry-stale", !!State.orcaError);
         for (const t of others) pills.append(buildPill(t, actions));
         pruneMiniBots();
       }
@@ -227,11 +249,11 @@ function buildOverview(actions: ViewActions): ViewHost {
 }
 
 function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
-  const label = task.id === "integration_claude" ? "VS Code" : task.name;
+  const label = task.id === "integration_claude" ? (State.settings.workspaceName || "Orca") : task.name;
   const canvas = createMiniBot(task, 24);
   const pill = h(
-    "div",
-    { class: "pill", onclick: () => actions.setFocus(task.id) },
+    "button",
+    { class: `pill${task.id === State.focusId ? " selected" : ""}`, title: `${task.name} · ${task.state}`, onclick: () => actions.setFocus(task.id === State.focusId ? "integration_claude" : task.id) },
     canvas,
     h("span", { class: "lbl", text: label }),
   );
@@ -254,7 +276,7 @@ function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
     const icons = { approval: ICONS.bang, finished: ICONS.check, error: ICONS.xmark } as const;
     const inner = h("i", { style: `background:${colors[task.pillBadge]}` }, svg(icons[task.pillBadge], 6, { stroke: task.pillBadge === "finished" ? 3 : 0 }));
     const badge = h("div", { class: "pill-badge" }, inner);
-    badge.style.boxShadow = `0 0 4px ${colors[task.pillBadge]}99`;
+    badge.style.boxShadow = "0 1px 3px rgba(0,0,0,.24)";
     pill.append(badge);
   }
   return pill;
@@ -327,10 +349,11 @@ function buildQuestion(): ViewHost {
   return {
     el,
     sync() {
-      clear(who);
-      who.append(agentWho(State.focusTask, "Claude Code is asking a question"));
       const task = State.focusTask;
-      title.textContent = task?.steps.at(-1) ?? "Claude needs an answer.";
+      const label = (task?.provider && State.providerLabel(task.provider)) || State.coordinatorProviderLabel;
+      clear(who);
+      who.append(agentWho(task, `${label} is asking a question`));
+      title.textContent = task?.steps.at(-1) ?? `${label} needs an answer.`;
       clear(row);
       row.append(h("div", { class: "sub", text: "Answer in your terminal — Coucou can't reply for you yet." }));
     },
@@ -352,8 +375,9 @@ function buildError(actions: ViewActions): ViewHost {
     el,
     sync() {
       const task = State.focusTask;
+      const label = task?.source === "n8n" ? "n8n" : ((task?.provider && State.providerLabel(task.provider)) || State.coordinatorProviderLabel);
       clear(who);
-      who.append(agentWho(task, task?.source === "n8n" ? "n8n" : "Claude Code"));
+      who.append(agentWho(task, label));
       title.textContent = task?.source === "n8n" ? "Workflow stopped." : "Session stopped on an error.";
       detail.textContent = task?.steps.at(-1) ?? "No detail available.";
     },
@@ -364,9 +388,9 @@ function buildError(actions: ViewActions): ViewHost {
 
 function buildFinished(actions: ViewActions): ViewHost {
   const who = h("div");
-  const title = h("div", { class: "title" });
+  const title = h("div", { class: "completion-summary" });
   const row = h("div", { class: "actions" },
-    btn("Open terminal", "primary", () => actions.openTerminal()),
+    btn("Open Orca", "primary", () => actions.openOrca()),
     btn("OK", "secondary", () => actions.collapse()),
   );
   const el = h("div", { class: "view" }, card("green", stack(116, 16, who, title, row)));
@@ -374,8 +398,8 @@ function buildFinished(actions: ViewActions): ViewHost {
     el,
     sync() {
       clear(who);
-      who.append(agentWho(State.focusTask, "Claude Code finished"));
-      title.textContent = State.focusTask?.steps.at(-1) ?? "Session finished";
+      who.append(agentWho(State.focusTask, "Agent finished"));
+      title.textContent = State.focusTask?.finalSummary || "Session finished. Final response unavailable.";
     },
   };
 }

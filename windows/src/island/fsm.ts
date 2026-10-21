@@ -18,6 +18,8 @@ export class IslandStateMachine {
   greetHoverCollapseDelay = 10;
   /** An alert waiting for an answer stays open, even when the mouse leaves. */
   pinned = false;
+  /** Predicate to check if any active agents prevent hiding. */
+  canHide: (() => boolean) | null = null;
 
   private petitHide: number | null = null;
   private homeCollapse: number | null = null;
@@ -27,7 +29,7 @@ export class IslandStateMachine {
 
   launch() {
     this.cancelTimers();
-    this.transition("coucou");
+    this.transition("home");
   }
 
   mouseEntered() {
@@ -77,11 +79,12 @@ export class IslandStateMachine {
     if (this.greetCollapse == null) this.scheduleGreetCollapse(this.greetAutoCollapseDelay);
   }
 
-  /** Non-alert work event: show compact from hidden. */
+  /** Non-alert work event: show compact from hidden and refresh hide timer. */
   reveal() {
-    if (this.state !== "hidden") return;
     this.cancelTimers();
-    this.transition("petit");
+    if (this.state === "hidden") {
+      this.transition("petit");
+    }
     this.schedulePetitHide();
   }
 
@@ -106,32 +109,44 @@ export class IslandStateMachine {
 
   private schedulePetitHide() {
     this.clear("petitHide");
-    this.petitHide = window.setTimeout(() => {
+    const delay = this.petitToHiddenDelay * 1000;
+    const setTimeoutFn = typeof window !== "undefined" ? window.setTimeout.bind(window) : globalThis.setTimeout;
+    this.petitHide = setTimeoutFn(() => {
       this.petitHide = null;
-      if (this.state === "petit") this.transition("hidden");
-    }, this.petitToHiddenDelay * 1000);
+      if (this.state !== "petit") return;
+      if (this.canHide && !this.canHide()) {
+        this.schedulePetitHide();
+        return;
+      }
+      this.transition("hidden");
+    }, delay) as unknown as number;
   }
 
   private scheduleHomeCollapse() {
     this.clear("homeCollapse");
-    if (this.pinned) return;
-    this.homeCollapse = window.setTimeout(() => {
+    const delay = this.homeToPetitDelay * 1000;
+    const setTimeoutFn = typeof window !== "undefined" ? window.setTimeout.bind(window) : globalThis.setTimeout;
+    this.homeCollapse = setTimeoutFn(() => {
       this.homeCollapse = null;
-      if (this.state === "home") this.transition("petit");
-    }, this.homeToPetitDelay * 1000);
+      if (this.state === "home") {
+        this.transition("petit");
+      }
+    }, delay) as unknown as number;
   }
 
   private scheduleGreetCollapse(delay: number) {
     this.clear("greetCollapse");
-    this.greetCollapse = window.setTimeout(() => {
+    const setTimeoutFn = typeof window !== "undefined" ? window.setTimeout.bind(window) : globalThis.setTimeout;
+    this.greetCollapse = setTimeoutFn(() => {
       this.greetCollapse = null;
       if (this.state === "coucou") this.transition("petit");
-    }, delay * 1000);
+    }, delay * 1000) as unknown as number;
   }
 
   private clear(which: "petitHide" | "homeCollapse" | "greetCollapse") {
     const id = this[which];
-    if (id != null) window.clearTimeout(id);
+    const clearTimeoutFn = typeof window !== "undefined" ? window.clearTimeout.bind(window) : globalThis.clearTimeout;
+    if (id != null) clearTimeoutFn(id as unknown as number);
     this[which] = null;
   }
 

@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Orca skin preview</title><style>body{background:#202225;color:#eceef0;font:14px system-ui;margin:32px}h1{font-size:22px}section{display:flex;gap:20px}article{width:172px;text-align:center}canvas{display:block;margin:auto}button{padding:10px 18px;margin:16px 0;background:#eee9df;border:0;border-radius:8px}</style></head><body><h1>Orca skin · expression preview</h1><p>Actual BotEngine, diagnostic states. Large Cou and subagent sizes.</p><button id="skin">Show original skin</button><section id="states"></section><script type="module">
+import {BotEngine} from '/src/mochi/engine.ts';
+const engines=[];BotEngine.setOrcaSkin(true);
+for(const state of ['idle','thinking','working','finished']){
+ const article=document.createElement('article');article.innerHTML=`<h2>${state==='finished'?'Done':state}</h2>`;
+ for(const mini of [false,true]) {const canvas=document.createElement('canvas'); const size=mini?48:168;canvas.width=size*2;canvas.height=size*2;canvas.style.width=size+'px';canvas.style.height=size+'px';article.append(canvas);const engine=new BotEngine();engine.isMini=mini;engine.setState(state,true);if(mini)engine.bodyColor=[.3,.5,.8];engines.push({engine,canvas,size});}
+ document.querySelector('#states').append(article);
+}
+function paint(){for(const {engine,canvas,size} of engines){const x=canvas.getContext('2d');x.setTransform(2,0,0,2,0,0);x.clearRect(0,0,size,size);engine.draw(x,size,size)}}paint();
+document.querySelector('#skin').onclick=()=>{BotEngine.setOrcaSkin(engines[0].engine.skin!=='orca');paint()};window.skinFixture={engines,paint,BotEngine};
+</script></body></html>

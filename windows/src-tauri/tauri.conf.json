@@ -5,7 +5,6 @@
   "identifier": "fr.louisraille.coucou",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -20,9 +19,9 @@
         "label": "island",
         "title": "Coucou",
         "url": "index.html",
-        "width": 240,
-        "height": 6,
-        "resizable": false,
+        "width": 720,
+        "height": 320,
+        "resizable": true,
         "decorations": false,
         "transparent": true,
         "shadow": false,

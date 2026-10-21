@@ -54,13 +54,33 @@ const OPEN_URLS: Record<string, string> = {
 };
 
 function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
+  if (task.id === "integration_claude") {
+    const connected = !State.orcaError && State.orca?.coordinator?.connected;
+    const label = State.orcaError ?? (connected ? "Connected · awaiting activity" : "Waiting for coordinator");
+    const runSelect = h("select", { class: "orca-run-picker", "aria-label": "Coordinator run", title: "Choose the coordinator to monitor" });
+    for (const run of State.orca?.runs ?? []) {
+      const option = h("option", { value: run.id, text: run.objective }) as HTMLOptionElement;
+      option.selected = run.id === State.orcaRunId;
+      runSelect.append(option);
+    }
+    runSelect.addEventListener("change", () => State.selectOrcaRun((runSelect as HTMLSelectElement).value));
+    return h("div", { class: "int-card" },
+      header(task.color, State.settings.workspaceName || "Orca", State.coordinatorProviderLabel),
+      h("div", { class: "int-status" }, dot(connected ? "#22C55E" : "#8e939c", 5), h("span", { text: label })),
+      State.orca?.runs.length ? runSelect : h("span", { class: "int-actions", text: "Open an Orca orchestration run" }),
+    );
+  }
   const info = State.integrations[task.id];
   const configured = info?.configured ?? false;
   const error = info?.error ?? null;
   // The Claude Code pill is about hooks, not a key — the macOS wording would be
   // misleading here.
   const missing = task.id === "integration_claude" ? "Hooks not installed" : "Key not configured";
-  const label = error ?? (configured ? "Connected · loading…" : missing);
+  const label =
+    error ??
+    (configured
+      ? (task.id === "integration_claude" ? "Connected · Ready" : "Connected · loading…")
+      : missing);
   const statusColor = error || !configured ? "#F4505E" : "#22C55E";
 
   const actions = h("div", { class: "int-actions" });
@@ -69,7 +89,7 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
       h("button", {
         class: "link-btn",
         style: `color:${task.color}b3`,
-        text: "Open Visual Studio Code",
+        text: `Open ${State.settings.workspaceName || "Orca"}`,
         onclick: () => void Bridge.openInVSCode(task.sessionCwd ?? null),
       }),
     );
@@ -110,7 +130,7 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
   return h(
     "div",
     { class: "int-card" },
-    header(task.color, task.id === "integration_claude" ? "VS Code" : task.name, "Integration"),
+    header(task.color, task.id === "integration_claude" ? (State.settings.workspaceName || "Orca") : task.name, "Integration"),
     h("div", { class: "int-status" }, dot(statusColor, 5), h("span", { text: label })),
     actions,
   );

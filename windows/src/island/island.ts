@@ -109,11 +109,16 @@ export class Island {
       collapse: () => this.collapse(),
       setFocus: (id) => {
         State.setFocus(id);
+        if (State.focusTask?.state === "finished") this.setView("finished");
         Sound.play("blip");
       },
-      openTerminal: () => {
-        const cwd = State.focusTask?.sessionCwd ?? null;
-        void Bridge.openInVSCode(cwd);
+      openOrca: () => {
+        void Bridge.openOrca(State.focusTask?.terminalHandle ?? null, State.coordinatorTask?.terminalHandle ?? null).catch((error) => {
+          const detail = String(error).slice(0, 200);
+          void Bridge.log(`Open Orca failed: ${detail}`);
+          State.noteMessage = `Orca could not be opened: ${detail}`;
+          this.setView("note");
+        });
       },
       // The ↗ button — same targets as openAgentTarget() on macOS.
       openTarget: () => {
@@ -127,9 +132,13 @@ export class Island {
           integration_notion: "https://notion.so",
           integration_calcom: "https://app.cal.com/bookings",
         };
-        if (task.id === "integration_claude") void Bridge.openInVSCode(task.sessionCwd ?? null);
-        else if (task.id === "integration_n8n") void Bridge.openN8n();
-        else if (urls[task.id]) void Bridge.openUrl(urls[task.id]);
+        if (task.id === "integration_claude" || task.parentId === "integration_claude") {
+          actions.openOrca();
+        } else if (task.id === "integration_n8n") {
+          void Bridge.openN8n();
+        } else if (urls[task.id]) {
+          void Bridge.openUrl(urls[task.id]);
+        }
       },
       openUrl: (url) => {
         if (url) void Bridge.openUrl(url);
@@ -225,12 +234,18 @@ export class Island {
 
   private wireFsm() {
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
+    this.fsm.canHide = () => {
+      return !State.tasks.some(
+        (t) => t.state === "working" || t.state === "thinking" || t.state === "approval"
+      );
+    };
     this.fsm.onTransition = (from, to) => {
       switch (to) {
         case "hidden":
           this.setMode("hidden");
           break;
         case "petit":
+          this.homeCollapseAt = null;
           if (from === "coucou") this.greeting.interrupt();
           else if (from === "hidden") Sound.play("peek");
           this.setMode("compact");
@@ -291,6 +306,8 @@ export class Island {
   expand(view: IslandViewName) {
     this.stopSequenceIfLeaving(view);
     State.view = view;
+    this.collapsed = false;
+    void Bridge.setCollapsed(false);
     if (State.mode !== "expanded") this.setMode("expanded");
     else this.animateGeometry(false);
     State.lastActivity = performance.now();
@@ -317,10 +334,7 @@ export class Island {
   collapse() {
     State.isPinned = false;
     this.fsm.pinned = false;
-    // Drive the state machine rather than the mode: setting the mode behind its
-    // back left it thinking the island was still open, and a click on the compact
-    // island then did nothing — the island could never be reopened.
-    this.fsm.forcePetit();
+    this.fsm.forceHidden();
   }
 
   /** Alert from the hook server: open on this view. Pinned alerts never auto-close. */
@@ -331,6 +345,8 @@ export class Island {
   }
 
   reveal() {
+    this.collapsed = false;
+    void Bridge.setCollapsed(false);
     this.fsm.reveal();
   }
 
@@ -727,13 +743,14 @@ export class Island {
     // looping animation — breathing, ratelimit sweat, sleeping z's, the search
     // sweep — so a hidden island went on burning frames in exactly the states it
     // spends most of its life in. Geometry still has to finish retracting.
+    const viewAnimating = this.views.get(State.view)?.animating?.() ?? false;
     const settling =
       this.width.animating || this.height.animating || this.radius.animating;
     const busy = State.mode === "hidden"
       ? settling
       : settling ||
         !this.botCx.settled || !this.botCy.settled || !this.botSize.settled ||
-        greetingActive || this.engine.busy || UploadSeq.isActive;
+        greetingActive || this.engine.busy || UploadSeq.isActive || viewAnimating;
 
     if (busy) {
       requestAnimationFrame(this.frame);
@@ -787,7 +804,7 @@ export class Island {
     const ctx = this.botCanvas.getContext("2d");
     if (!ctx) return;
 
-    const focus = State.focusTask;
+    const focus = State.coordinatorTask;
     this.engine.bodyColor = focus?.isIntegration ? hexToRGB(focus.color) : null;
     this.engine.particleOverhang = BOT_OVERHANG;
     this.engine.lookX = this.lookX();
@@ -864,7 +881,7 @@ export class Island {
     const showGrid = State.mode === "compact";
     this.miniGrid.style.opacity = showGrid ? "1" : "0";
     if (showGrid) {
-      const others = State.otherTasks.slice(0, 4);
+      const others = State.childTasks.slice(0, 4);
       const key = others.map((t) => t.id).join("|");
       if (this.miniGrid.dataset.key !== key) {
         this.miniGrid.dataset.key = key;
@@ -882,6 +899,7 @@ export class Island {
 
   /** Applies settings coming from Rust at boot. */
   applySettings() {
+    BotEngine.setPrincipalSkin(State.settings.principalSkin ?? (State.settings.orcaSkin ? "orca" : "classic"));
     Sound.setEnabled(State.settings.soundEnabled);
     Sound.setVolume(State.settings.soundVolume);
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;

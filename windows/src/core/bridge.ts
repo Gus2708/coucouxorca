@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { Settings } from "./state";
+import type { OrcaSnapshot, Settings } from "./state";
 
 export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -32,6 +32,11 @@ export interface BootInfo {
 
 export const Bridge = {
   boot: () => call<BootInfo>("boot"),
+  orcaSnapshot: (runId: string | null) => callOrThrow<OrcaSnapshot>("orca_snapshot", { runId }),
+  codexChildren: (transcriptPath:string,sessionId:string) => callOrThrow<{id:string;name:string;state:string;text?:string|null;phase?:string|null;turn?:string|null}[]>("codex_children",{transcriptPath,sessionId}),
+  codexMessage: (transcriptPath: string, sessionId: string, turnId: string) => callOrThrow<{text: string; phase: string} | null>("codex_message", {transcriptPath, sessionId, turnId}),
+  orcaCompletion: (dispatchId: string) => callOrThrow<string | null>("orca_completion", { dispatchId }),
+  openOrca: (terminalHandle: string | null, coordinatorHandle: string | null) => callOrThrow<{ opened: boolean; terminalFocused: boolean }>("open_orca", { terminalHandle, coordinatorHandle }),
 
   saveSettings: (settings: Settings) => call<void>("save_settings", { settings }),
 

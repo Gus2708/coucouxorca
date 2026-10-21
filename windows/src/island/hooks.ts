@@ -12,11 +12,79 @@ const CLAUDE_ID = "integration_claude";
 
 /** Clears the approval card if no decision was made before the hook gave up. */
 let pendingTimeout: number | null = null;
+const eventRevisions = new Map<string, number>();
+
+interface CodexBinding {
+  task: (typeof State.tasks)[number];
+  run: string | null;
+  path: string;
+  session: string;
+  turn: string;
+  lastText?: string;
+  lastStep?: string;
+  nativeResponses?: Map<string,string>;
+}
+const codexBindings = new Map<string, CodexBinding>();
+let activeIsland: Island | null = null;
+const seenResponses = new Map<string, string>();
+function assistantResponse(id: string, text: string | undefined, phase: string, session = "", turn = "") {
+  if (!text?.trim()) return;
+  const key = `${State.orcaRunId}:${session}:${turn}:${phase}:${text}`;
+  if (seenResponses.get(id) === key) return;
+  seenResponses.set(id, key);
+  if (State.mode !== "expanded") activeIsland?.alert(phase === "final_answer" && State.focusId === id ? "finished" : "overview");
+}
+
+/** Read only a hook-published transcript for the exact observed task and turn. */
+export async function pollCodexMessages() {
+  for (const [id, binding] of [...codexBindings]) {
+    if (State.paused || binding.run !== State.orcaRunId || !State.tasks.includes(binding.task)) {
+      codexBindings.delete(id);
+      continue;
+    }
+    try {
+      if (id === CLAUDE_ID && Bridge.codexChildren) {
+        const children = await Bridge.codexChildren(binding.path,binding.session);
+        if (codexBindings.get(id) !== binding || binding.run !== State.orcaRunId || !State.tasks.includes(binding.task)) continue;
+        State.syncNativeChildren(binding.session,children);
+        const previous = binding.nativeResponses;
+        const next = new Map<string,string>();
+        for (const child of children) {
+          const key = `${child.turn}:${child.phase}:${child.text ?? ""}`;
+          next.set(child.id,key);
+          // First discovery establishes a baseline, including inherited/history responses.
+          if (child.text && previous?.has(child.id) && previous.get(child.id) !== key) assistantResponse(`native_${child.id}`,child.text,child.phase ?? "commentary",child.id,child.turn ?? "");
+        }
+        binding.nativeResponses = next;
+      }
+      const response = await Bridge.codexMessage(binding.path, binding.session, binding.turn);
+      if (!response || codexBindings.get(id) !== binding || binding.run !== State.orcaRunId || !State.tasks.includes(binding.task)) continue;
+      if (response.phase === "commentary" && !["finished", "error", "idle"].includes(binding.task.state)) {
+        if (response.text !== binding.lastText || binding.task.steps.at(-1) !== binding.lastStep) {
+          const fresh = response.text !== binding.lastText;
+          State.appendAssistantMessage(id, response.text);
+          if (fresh) assistantResponse(id, response.text, response.phase, binding.session, binding.turn);
+          binding.lastText = response.text;
+          binding.lastStep = binding.task.steps.at(-1);
+        }
+      } else if (response.phase === "final_answer" && binding.task.state === "finished" && !binding.task.finalSummary) {
+        State.setFinalSummary(id, response.text);
+        assistantResponse(id, response.text, response.phase, binding.session, binding.turn);
+      }
+    } catch { /* An unavailable exact transcript cannot authorize a guessed session. */ }
+  }
+}
 
 interface HookPayload {
   hook_event_name?: string;
   request_id?: string;
   session_id?: string;
+  transcript_path?: string;
+  turn_id?: string;
+  agent_id?: string;
+  last_assistant_message?: string;
+  orca_terminal_handle?: string;
+  orca_pane_key?: string;
   cwd?: string;
   message?: string;
   /** UserPromptSubmit carries `prompt`; `message` belongs to Notification/Stop. */
@@ -25,23 +93,6 @@ interface HookPayload {
   tool_input?: Record<string, unknown>;
   /** Optional agent tag: lowercase, digits and hyphens, ≤ 24 chars. */
   coucou_agent?: string;
-}
-
-/** Same rule as HookServer.validateAgent on macOS. "claude" is reserved. */
-function validateAgent(raw: string | undefined): string | null {
-  if (!raw || raw.length > 24 || raw === "claude") return null;
-  if (!/^[a-z0-9-]+$/.test(raw)) return null;
-  return raw;
-}
-
-const FALLBACK_COLORS = ["#22C55E", "#EAB308", "#60A5FA", "#E879F9"];
-
-function agentColor(name: string): string {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) {
-    h = (Math.imul(31, h) + name.charCodeAt(i)) | 0;
-  }
-  return FALLBACK_COLORS[Math.abs(h) % FALLBACK_COLORS.length];
 }
 
 const PROJECT_ALIASES: Record<string, string> = {
@@ -63,16 +114,34 @@ function lastPathComponent(p: string): string {
 /** frenchStep() — same labels as the macOS app. */
 const TOOL_LABELS: Record<string, string> = {
   Bash: "Exécute",
+  run_command: "Exécute",
+  exec_command: "Exécute",
+  shell: "Exécute",
+  write_stdin: "Exécute",
   Read: "Lit",
+  view_file: "Lit",
+  read_file: "Lit",
   Write: "Écrit",
+  write_to_file: "Écrit",
+  write_file: "Écrit",
   Edit: "Modifie",
+  replace_file_content: "Modifie",
+  multi_replace_file_content: "Modifie",
+  apply_patch: "Modifie",
+  edit_file: "Modifie",
   Glob: "Cherche",
+  find_by_name: "Cherche",
   Grep: "Recherche",
+  grep_search: "Recherche",
   WebSearch: "Recherche web",
+  search_web: "Recherche web",
   WebFetch: "Récupère",
+  read_url_content: "Récupère",
   TodoWrite: "Tâches",
   Task: "Agent",
+  invoke_subagent: "Agent",
   LS: "Liste",
+  list_dir: "Liste",
   MultiEdit: "Modifie",
   NotebookEdit: "Notebook",
   PowerShell: "Exécute",
@@ -81,13 +150,11 @@ const TOOL_LABELS: Record<string, string> = {
 function stepLabel(tool: string, input: Record<string, unknown>): string {
   const label = TOOL_LABELS[tool] ?? tool;
   const str = (k: string) => (typeof input[k] === "string" ? (input[k] as string) : null);
-  const cmd = str("command");
+  const cmd = str("command") ?? str("CommandLine") ?? str("cmd");
   if (cmd) return `${label} · ${cmd.slice(0, 40)}`;
-  const path = str("path");
+  const path = str("path") ?? str("AbsolutePath") ?? str("TargetFile") ?? str("file_path");
   if (path) return `${label} · ${lastPathComponent(path)}`;
-  const file = str("file_path");
-  if (file) return `${label} · ${lastPathComponent(file)}`;
-  const query = str("query");
+  const query = str("query") ?? str("pattern") ?? str("Query") ?? str("Pattern");
   if (query) return `${label} · ${query.slice(0, 40)}`;
   return label;
 }
@@ -102,10 +169,15 @@ function stepLabel(tool: string, input: Record<string, unknown>): string {
  */
 const APPROVAL_FIELDS = [
   "command", // Bash, PowerShell
+  "CommandLine", // Antigravity run_command
+  "cmd", // Codex exec_command
   "file_path", // Write, Edit, MultiEdit, NotebookEdit
+  "TargetFile", // Antigravity write/replace
+  "AbsolutePath", // Antigravity view_file
   "path", // Read, LS
   "url", // WebFetch
-  "query", // WebSearch
+  "Url", // read_url_content
+  "query", // WebSearch, search_web
   "pattern", // Glob, Grep
   "prompt", // Task
 ] as const;
@@ -120,10 +192,11 @@ function approvalTarget(tool: string, input: Record<string, unknown>): string {
   return tool;
 }
 
-function upsert(projectName: string, cwd: string) {
+function upsert(_projectName: string, cwd: string) {
   const t = State.tasks.find((x) => x.id === CLAUDE_ID);
   if (!t) return;
-  t.name = projectName;
+  t.name = State.settings.workspaceName || "Orca";
+  if (State.settings.workspaceColor) t.color = State.settings.workspaceColor;
   if (cwd) t.sessionCwd = cwd;
 }
 
@@ -132,11 +205,13 @@ function clearSession() {
   if (!t) return;
   t.steps = [];
   t.stepIndex = 0;
-  t.name = "VS Code";
+  t.name = State.settings.workspaceName || "Orca";
+  t.color = State.settings.workspaceColor || "#F5F6F8";
   t.pillBadge = null;
 }
 
 export function registerHookHandlers(island: Island) {
+  activeIsland = island;
   void onEvent<HookPayload>("hook", (payload) => handleHook(island, payload));
 }
 
@@ -154,32 +229,51 @@ function handleHook(island: Island, payload: HookPayload) {
   const raw = lastPathComponent(cwd);
   const projectName = aliasProjectName(raw || "Session");
 
-  // Route to the right pill. Valid coucou_agent → dynamic "agent_<name>" pill.
-  // "claude" is reserved; absent or invalid → Claude Code pill unchanged.
-  const validAgent = validateAgent(payload.coucou_agent);
-  const agentId = validAgent ? `agent_${validAgent}` : CLAUDE_ID;
-  const isExternalAgent = validAgent !== null;
+  // Orca supplies ownership; workspace names and generic worktrees are not authority.
+  let agentId = State.hookTaskId(cwd, payload.orca_terminal_handle, payload.orca_pane_key);
+  if (agentId && payload.agent_id) {
+    const owner = codexBindings.get(agentId);
+    const child = State.childTasks.find(t => t.nativeSessionId === payload.agent_id && t.nativeParentSession === owner?.session);
+    agentId = child?.id ?? null;
+  }
+  if (!agentId) {
+    if (payload.request_id) void Bridge.approvalDecline(payload.request_id);
+    return;
+  }
+  const task = State.tasks.find((item) => item.id === agentId);
+  const provider = agentId === CLAUDE_ID ? State.orca?.coordinator?.provider
+    : task?.nativeSessionId ? "codex" : State.orca?.workers.find((worker) => `orca_${worker.id}` === agentId)?.provider;
+  // Provider subagents folded into a parent pane do not own that pane's messages.
+  if (task && provider === "codex" && !payload.agent_id) {
+    const previous = codexBindings.get(agentId);
+    if (name === "SessionStart" || name === "UserPromptSubmit" || name === "SessionEnd" || (payload.turn_id && previous?.turn !== payload.turn_id)) codexBindings.delete(agentId);
+    if (payload.transcript_path && payload.session_id && payload.turn_id) {
+      const same = previous && codexBindings.get(agentId) === previous && previous.task === task && previous.run === State.orcaRunId && previous.path === payload.transcript_path && previous.session === payload.session_id && previous.turn === payload.turn_id;
+      if (!same) codexBindings.set(agentId, {task, run: State.orcaRunId, path: payload.transcript_path, session: payload.session_id, turn: payload.turn_id});
+    }
+  }
+  const isExternalAgent = agentId !== CLAUDE_ID;
+  State.noteOrcaHook(agentId);
+  const revision = (eventRevisions.get(agentId) ?? 0) + 1;
+  eventRevisions.set(agentId, revision);
 
-  const focused = State.focusId === agentId;
+  const focused = agentId === CLAUDE_ID || State.focusId === agentId;
 
   /** Alerts force the island open; work events only reveal the compact island. */
-  const surface = (view: Parameters<Island["alert"]>[0], isAlert: boolean) => {
+  const surface = (view: Parameters<Island["alert"]>[0], isAlert = false) => {
+    if (isAlert) State.setFocus(agentId);
     if (State.mode === "expanded") {
-      if (isAlert) island.setView(view);
+      island.setView(view);
     } else if (isAlert) {
       island.alert(view);
     } else if (State.mode === "hidden") {
-      island.reveal();
+      island.reveal?.();
     }
   };
 
-  /** Ensure the agent pill exists (no-op for Claude Code). */
+  /** Only the verified coordinator can update the principal's workspace. */
   const ensurePill = () => {
-    if (isExternalAgent) {
-      State.upsertExternalAgent(agentId, validAgent!, agentColor(validAgent!));
-    } else {
-      upsert(projectName, cwd);
-    }
+    if (!isExternalAgent) upsert(projectName, cwd);
   };
 
   switch (name) {
@@ -189,7 +283,9 @@ function handleHook(island: Island, payload: HookPayload) {
       Sound.play("work");
       break;
 
+    case "PreInvocation":
     case "UserPromptSubmit": {
+      seenResponses.delete(agentId);
       ensurePill();
       State.updateTask(agentId, "thinking");
       // The field is `prompt`; reading `message` meant this step was always blank.
@@ -208,13 +304,21 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
     }
 
+    case "PostInvocation":
     case "PostToolUse":
+      // A restart can miss PreToolUse while the tool is already running.
+      // Restore only the missing step, using this verified session's payload.
+      if (name === "PostToolUse" && payload.tool_name && !State.tasks.find((t) => t.id === agentId)?.steps.length) {
+        State.appendStep(agentId, stepLabel(payload.tool_name, payload.tool_input ?? {}));
+      }
       State.updateTask(agentId, "working");
+      surface("overview", false);
       break;
 
     case "PostToolUseFailure":
       State.updateTask(agentId, "working");
       State.appendStep(agentId, "⚠ failed");
+      surface("overview", false);
       break;
 
     case "Notification": {
@@ -232,14 +336,14 @@ function handleHook(island: Island, payload: HookPayload) {
 
     case "Stop":
       State.updateTask(agentId, "finished");
-      if (payload.message) State.appendStep(agentId, payload.message.slice(0, 60));
+      State.setFinalSummary(agentId, payload.last_assistant_message);
       Sound.play("finish");
-      if (focused) surface("finished", true);
+      assistantResponse(agentId, payload.last_assistant_message, "final_answer", payload.session_id, payload.turn_id);
+      if (focused && State.mode === "expanded") surface("finished", false);
       else State.setPillBadge(agentId, "finished");
       window.setTimeout(() => {
-        if (isExternalAgent) {
-          State.removeTask(agentId);
-        } else {
+        if (eventRevisions.get(agentId) !== revision) return;
+        if (!isExternalAgent) {
           State.updateTask(agentId, "idle");
           State.setPillBadge(agentId, null);
         }
@@ -249,13 +353,13 @@ function handleHook(island: Island, payload: HookPayload) {
     case "StopFailure":
       State.updateTask(agentId, "error");
       Sound.play("error");
-      if (focused) surface("error", true);
+      if (focused) surface("error", false);
       else State.setPillBadge(agentId, "error");
       break;
 
     case "SessionEnd":
       if (isExternalAgent) {
-        State.removeTask(agentId);
+        State.updateTask(agentId, "idle");
       } else {
         State.updateTask(agentId, "idle");
         clearSession();
@@ -276,10 +380,14 @@ function handleHook(island: Island, payload: HookPayload) {
       // terminal. Approval support for other agents will come with Codex support.
       if (isExternalAgent) {
         if (payload.request_id) void Bridge.approvalDecline(payload.request_id);
+        State.updateTask(agentId, "approval");
+        State.setPillBadge(agentId, "approval");
+        island.reveal?.();
         break;
       }
 
       const requestId = payload.request_id ?? "";
+
       // One card, one request. A second one must never quietly replace the first
       // — that would leave a human staring at request B while request A waits for
       // a decision nobody can give. Hand it straight back to the terminal.
@@ -297,6 +405,7 @@ function handleHook(island: Island, payload: HookPayload) {
         tool,
         command: approvalTarget(tool, input),
       };
+      State.setFocus(CLAUDE_ID);
       // The relay's short ack window closes in 800 ms; everything below this
       // line is synchronous, so the card really is up by the time it lands.
       if (requestId) void Bridge.approvalAck(requestId);
