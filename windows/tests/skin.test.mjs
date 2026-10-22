@@ -68,3 +68,12 @@ test("Codex mini skin uses the provider renderer without the classic mouth or fo
     else globalThis.Path2D = previousPath2D;
   }
 });
+
+test("auto skin follows the first known provider and falls back to classic", async () => {
+  const { autoSkin, principalSkinSetting } = await loadEngine();
+  assert.equal(autoSkin([null, "codex", "claude"]), "codex");
+  assert.equal(autoSkin(["gemini", undefined, "antigravity"]), "antigravity");
+  assert.equal(autoSkin([]), "classic");
+  assert.equal(principalSkinSetting("auto"), "auto");
+  assert.equal(principalSkinSetting("bogus"), "classic");
+});

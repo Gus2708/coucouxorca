@@ -13,7 +13,7 @@ import {
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import { SPOTIFY_ID, islandDances } from "../core/spotify";
-import { avatarSkin, BotEngine, hexToRGB } from "../mochi/engine";
+import { autoSkin, BotEngine, hexToRGB, principalSkinSetting } from "../mochi/engine";
 import { Greeting } from "../mochi/greeting";
 import { createMiniBot, pruneMiniBots, syncMiniBotStates, tickMiniBots } from "../mochi/minibots";
 import { SeasonCache, parseOutfit } from "../mochi/wardrobe";
@@ -1219,9 +1219,22 @@ export class Island {
     if (this.clockEl.textContent !== text) this.clockEl.textContent = text;
   }
 
+  /** Mochi's skin: the chosen one, or in auto the agent in use (Orca coordinator first, then a working session, then the focused one). */
+  private syncPrincipalSkin() {
+    const setting = principalSkinSetting(State.settings.principalSkin);
+    if (setting !== "auto") return BotEngine.setPrincipalSkin(setting);
+    const sessions = State.tasks.filter((t) => !t.isIntegration);
+    BotEngine.setPrincipalSkin(autoSkin([
+      State.orca?.coordinator?.connected ? State.orca.coordinator.provider : null,
+      ...sessions.filter((t) => t.state !== "idle").map((t) => t.provider),
+      State.focusTask?.provider,
+      ...sessions.map((t) => t.provider),
+    ]));
+  }
+
   /** Applies settings coming from Rust at boot. */
   applySettings() {
-    BotEngine.setPrincipalSkin(avatarSkin(State.settings.principalSkin));
+    this.syncPrincipalSkin();
     Sound.setEnabled(State.settings.soundEnabled);
     Sound.setVolume(State.settings.soundVolume);
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;

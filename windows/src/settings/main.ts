@@ -958,13 +958,13 @@ function generalSection(): HTMLElement {
 
   const principalSkin = h("select", {}) as HTMLSelectElement;
   for (const [value, label] of [
-    ["classic", "Classic"], ["orca", "Orca"], ["antigravity", "Antigravity"],
+    ["auto", "Follow the agent"], ["classic", "Classic"], ["orca", "Orca"], ["antigravity", "Antigravity"],
     ["codex", "Codex"], ["claude", "Claude"],
   ]) principalSkin.append(h("option", { value, text: t(label) }));
-  principalSkin.value = settings.principalSkin && ["classic", "orca", "antigravity", "codex", "claude"].includes(settings.principalSkin)
+  principalSkin.value = settings.principalSkin && ["auto", "classic", "orca", "antigravity", "codex", "claude"].includes(settings.principalSkin)
     ? settings.principalSkin : "classic";
   principalSkin.addEventListener("change", () => {
-    settings.principalSkin = principalSkin.value as AvatarSkin;
+    settings.principalSkin = principalSkin.value as AvatarSkin | "auto";
     void save();
   });
 

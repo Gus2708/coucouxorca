@@ -128,6 +128,22 @@ export function providerSkin(provider?: string | null): AvatarSkin {
   return provider === "claude" || provider === "codex" || provider === "antigravity" ? provider : "classic";
 }
 
+/** "auto" lets Mochi wear the skin of the agent being worked with. */
+export type PrincipalSkinSetting = AvatarSkin | "auto";
+
+export function principalSkinSetting(skin?: string | null): PrincipalSkinSetting {
+  return skin === "auto" ? "auto" : avatarSkin(skin);
+}
+
+/** The first known provider in priority order decides the skin; none keeps the classic Mochi. */
+export function autoSkin(providers: (string | null | undefined)[]): AvatarSkin {
+  for (const provider of providers) {
+    const skin = providerSkin(provider);
+    if (skin !== "classic") return skin;
+  }
+  return "classic";
+}
+
 /** Keeps the face markings attached to projected eyes while the body turns. */
 export function orcaLandmarks(yaw: number, pitch: number, roll: number, rx: number, ry: number, morph = 0) {
   const eyePitch = EYE_P + pitch + roll;

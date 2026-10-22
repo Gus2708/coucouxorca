@@ -975,6 +975,7 @@ mod tests {
                 "customUrl",
                 "shortcuts",
                 "mochiOutfit",
+                "principalSkin",
                 "pillColors",
                 "language",
                 "desktopMochi",

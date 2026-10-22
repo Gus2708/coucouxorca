@@ -156,7 +156,7 @@ export interface IntegrationInfo {
 
 export interface Settings {
   orcaSkin?: boolean;
-  principalSkin?: AvatarSkin | null;
+  principalSkin?: AvatarSkin | "auto" | null;
   soundEnabled: boolean;
   soundVolume: number;
   autoCloseInterval: number;
@@ -226,7 +226,7 @@ export interface Settings {
   };
 }
 
-export function principalSkin(settings: Pick<Settings, "principalSkin" | "orcaSkin">): AvatarSkin {
+export function principalSkin(settings: Pick<Settings, "principalSkin" | "orcaSkin">): AvatarSkin | "auto" {
   return settings.principalSkin ?? (settings.orcaSkin ? "orca" : "classic");
 }
 
