@@ -865,7 +865,7 @@ pub fn run() {
         builder = builder.plugin(shortcuts::plugin());
     }
 
-    builder
+    let builder = builder
         .manage(Shared {
             settings: Mutex::new(loaded.clone()),
             gate: gate.clone(),
@@ -1079,10 +1079,18 @@ pub fn run() {
                 show_hub(&handle, None);
             }
             Ok(())
-        })
-        .build(tauri::generate_context!())
-        .expect("error while building Coucou")
-        .run(|app, event| {
+        });
+    let app = match builder.build(tauri::generate_context!()) {
+        Ok(app) => app,
+        Err(err) => {
+            log::line(format!("Coucou build failed: {err}"));
+            let dir = settings::local_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("crash.log"), format!("Coucou build failed: {err}\n"));
+            return;
+        }
+    };
+    app.run(|app, event| {
             // Withdraw the phone link's announcement on the local network before the process ends.
             if let tauri::RunEvent::Exit = event {
                 phone_link::stop_on_exit(app);

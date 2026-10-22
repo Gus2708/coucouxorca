@@ -16,12 +16,21 @@ import { Recap } from "./recap/recap";
 import { Updates } from "./island/update";
 import { onLanguageChange, resolveLanguage, setLanguage, systemLanguages } from "./i18n/i18n";
 
+window.addEventListener("error", (e) => {
+  void Bridge.log(`[JS-ERROR] ${e.message} at ${e.filename}:${e.lineno}:${e.colno}`);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  void Bridge.log(`[JS-UNHANDLED] ${e.reason}`);
+});
+
+
 /** Shows the language Settings asks for ("" = the system's, when Coucou has it). */
 function applyLanguage() {
   setLanguage(resolveLanguage(State.settings.language, systemLanguages()));
 }
 
 async function main() {
+  void Bridge.log("main() started");
   const root = document.getElementById("root");
   if (!root) return;
 
@@ -161,6 +170,7 @@ async function main() {
   await onEvent<null>("recap-check", checkRecap);
 
   island.launch();
+  void Bridge.log("main() finished, island launched");
 
   // In a plain browser there is no wake strip behind the cursor: make the whole
   // page wake the island so the visuals can be checked with `npm run dev`.
